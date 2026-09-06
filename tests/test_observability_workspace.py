@@ -300,3 +300,51 @@ def test_workspace_opener_has_no_legacy_layout_or_concrete_store_dependency() ->
         "_ReadOnlySQLiteRunStore",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.asyncio
+async def test_readonly_memory_checkpoint_and_events_preserve_scope_and_persistence(tmp_path):
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    factory = CanonicalMemoryFacadeFactory(bundle=bundle, owner_scope=OWNER)
+    memory = factory.for_public_execution(
+        StorageScope(session_id="s1"),
+        logical_scope_id="session:s1",
+        provenance_scope=StorageScope(session_id="s1", run_id="r1"),
+    )
+    saved = {"checkpoint_id": "cp1", "semantic_summary": {"text": "exact summary"}}
+    await memory.append_state_snapshot("cp1", saved, kind="test.checkpoint")
+    event = await memory.append_event(
+        kind="agent_engine.tool_result",
+        text="receipt",
+        data={"exact": "你好"},
+        tags=["agent_engine"],
+    )
+    await bundle.close()
+    reader = open_observability_workspace(tmp_path)
+    try:
+        assert (
+            await reader.read_memory_state(session_id="s1", key="cp1", kind="test.checkpoint")
+            == saved
+        )
+        assert (
+            await reader.read_memory_state(session_id="s2", key="cp1", kind="test.checkpoint")
+            is None
+        )
+        assert (
+            await reader.read_memory_state(
+                session_id="s1",
+                key="cp1",
+                kind="test.checkpoint",
+                memory_scope={"project_id": "other"},
+            )
+            is None
+        )
+        rows = await reader.read_memory_events(
+            session_id="s1", event_ids=[event.event_id, "missing"]
+        )
+        assert len(rows) == 1
+        assert rows[0]["data"] == {"exact": "你好"}
+        assert await reader.read_memory_events(session_id="s2", event_ids=[event.event_id]) == []
+    finally:
+        await reader.close()

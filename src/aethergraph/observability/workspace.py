@@ -505,6 +505,112 @@ class _CanonicalObservabilityFacade:
             cursor = page.next_cursor
         return [_event_mapping(record) for record in records]
 
+    async def read_memory_state(
+        self,
+        *,
+        session_id: str,
+        key: str,
+        kind: str,
+        memory_scope: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Read durable Memory state in an authorized historical scope.
+
+        Intro:
+            Read the canonical StateStore using trusted owner and Memory identity.
+
+        Examples:
+            Read a session checkpoint:
+                ```python
+                value = await reader.read_memory_state(session_id="s1", key="k", kind="checkpoint")
+                ```
+
+            Detect missing state:
+                ```python
+                assert await reader.read_memory_state(session_id="s1", key="missing", kind="checkpoint") is None
+                ```
+
+        Args:
+            session_id: Owning session, checked against suppression policy.
+            key: Exact Memory state identity.
+            kind: Memory state family; interpreted by the caller.
+            memory_scope: Canonical scope recorded by the runtime, or the historical session scope.
+
+        Returns:
+            dict | None: Persisted mapping, never reconstructed from observations.
+
+        Notes:
+            Only trusted read projections supply memory_scope. Owner/identity conflicts fail closed.
+        """
+        from aethergraph.services.memory.canonical_facade import (
+            _memory_state_namespace,
+            _memory_state_key,
+        )
+
+        hidden = await self.list_suppressed_scopes(session_id=session_id)
+        if session_id in hidden.get("session_id", set()):
+            return None
+        scope = self._query_scope(
+            **(memory_scope if memory_scope is not None else {"session_id": session_id})
+        )
+        if scope is None:
+            return None
+        bundle = await self._bundle()
+        record = await bundle.state.get(
+            scope, _memory_state_namespace(kind), _memory_state_key(key)
+        )
+        return None if record is None else _plain_json(record.value)
+
+    async def read_memory_events(
+        self,
+        *,
+        session_id: str,
+        event_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Hydrate exact source Events within a non-suppressed session.
+
+        Intro:
+            Read the canonical EventStore with session and suppression containment.
+
+        Examples:
+            Read exact evidence:
+                ```python
+                events = await reader.read_memory_events(session_id="s1", event_ids=["event-1"])
+                ```
+
+            Detect missing evidence:
+                ```python
+                assert await reader.read_memory_events(session_id="s1", event_ids=["missing"]) == []
+                ```
+
+        Args:
+            session_id: Exact owning session.
+            event_ids: At most 100 exact source identities.
+
+        Returns:
+            list[dict]: Public Memory Event mappings; absent/hidden records are omitted.
+
+        Notes:
+            This uses Memory's authoritative Event conversion, not trace previews.
+        """
+        from aethergraph.services.memory.canonical_public import _public_event
+
+        if len(event_ids) > 100:
+            raise ValueError("Read at most 100 Memory Events per batch.")
+        scope = self._query_scope(session_id=session_id)
+        if scope is None:
+            return []
+        hidden = await self.list_suppressed_scopes(session_id=session_id)
+        if session_id in hidden.get("session_id", set()):
+            return []
+        bundle = await self._bundle()
+        records = await bundle.memory_events.get_many(scope, tuple(dict.fromkeys(event_ids)))
+        hidden_runs = hidden.get("run_id", set()) | hidden.get("trace_id", set())
+        return [
+            asdict(_public_event(record, f"session:{session_id}"))
+            for record in records
+            if record.scope.run_id not in hidden_runs
+        ]
+
     async def hydrate_prompt_manifest(self, manifest_id: str) -> dict[str, Any] | None:
         """Project one prompt manifest from canonical LLM correlation and detail.
 
