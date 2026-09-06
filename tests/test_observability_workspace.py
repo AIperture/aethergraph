@@ -387,6 +387,28 @@ async def test_historical_memory_scope_uses_publishing_run_identity(tmp_path):
         assert await reader.read_memory_state(
             session_id="s1", key="cp", kind="test.checkpoint", owner_run_id="r1"
         ) == {"summary": "persisted under exact identity"}
+        assert await reader.read_memory_state(
+            session_id="s1",
+            key="cp",
+            kind="test.checkpoint",
+            owner_run_id="r1",
+            memory_scope={
+                "project_id": "project-1",
+                "session_id": "s1",
+                "user_id": "local",
+                "org_id": "local",
+            },
+        ) == {"summary": "persisted under exact identity"}
+        assert (
+            await reader.read_memory_state(
+                session_id="s1",
+                key="cp",
+                kind="test.checkpoint",
+                owner_run_id="r1",
+                memory_scope={"session_id": "s1", "user_id": "someone-else", "org_id": "local"},
+            )
+            is None
+        )
         assert (
             await reader.read_memory_state(
                 session_id="other-session", key="cp", kind="test.checkpoint", owner_run_id="r1"

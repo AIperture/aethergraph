@@ -565,8 +565,8 @@ class _CanonicalObservabilityFacade:
                     {key: owner[key] for key in ("user_id", "org_id") if owner.get(key)}
                 )
             else:
-                for key in ("user_id", "org_id"):
-                    if dimensions.get(key) and owner.get(key) != dimensions[key]:
+                for dimension in ("user_id", "org_id"):
+                    if dimensions.get(dimension) and owner.get(dimension) != dimensions[dimension]:
                         return None
         scope = self._query_scope(**dimensions)
         if scope is None:
