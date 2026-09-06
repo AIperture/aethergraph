@@ -512,6 +512,7 @@ class _CanonicalObservabilityFacade:
         key: str,
         kind: str,
         memory_scope: dict[str, str] | None = None,
+        owner_run_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Read durable Memory state in an authorized historical scope.
 
@@ -534,6 +535,7 @@ class _CanonicalObservabilityFacade:
             key: Exact Memory state identity.
             kind: Memory state family; interpreted by the caller.
             memory_scope: Canonical scope recorded by the runtime, or the historical session scope.
+            owner_run_id: Publishing run whose canonical identity owns historical Memory.
 
         Returns:
             dict | None: Persisted mapping, never reconstructed from observations.
@@ -549,9 +551,24 @@ class _CanonicalObservabilityFacade:
         hidden = await self.list_suppressed_scopes(session_id=session_id)
         if session_id in hidden.get("session_id", set()):
             return None
-        scope = self._query_scope(
-            **(memory_scope if memory_scope is not None else {"session_id": session_id})
-        )
+        dimensions = dict(memory_scope) if memory_scope is not None else {"session_id": session_id}
+        if dimensions.get("session_id", session_id) != session_id:
+            return None
+        if owner_run_id is not None:
+            if owner_run_id in hidden.get("run_id", set()) | hidden.get("trace_id", set()):
+                return None
+            owner = await self.get_run(owner_run_id)
+            if owner is None or owner.get("session_id") != session_id:
+                return None
+            if memory_scope is None:
+                dimensions.update(
+                    {key: owner[key] for key in ("user_id", "org_id") if owner.get(key)}
+                )
+            else:
+                for key in ("user_id", "org_id"):
+                    if dimensions.get(key) and owner.get(key) != dimensions[key]:
+                        return None
+        scope = self._query_scope(**dimensions)
         if scope is None:
             return None
         bundle = await self._bundle()

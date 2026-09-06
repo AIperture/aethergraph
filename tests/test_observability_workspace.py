@@ -348,3 +348,60 @@ async def test_readonly_memory_checkpoint_and_events_preserve_scope_and_persiste
         assert await reader.read_memory_events(session_id="s2", event_ids=[event.event_id]) == []
     finally:
         await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_historical_memory_scope_uses_publishing_run_identity(tmp_path):
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    run_scope = StorageScope(
+        project_id="project-1",
+        user_id="local",
+        org_id="local",
+        session_id="s1",
+        run_id="r1",
+        graph_id="g1",
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="r1",
+            graph_id="g1",
+            kind="taskgraph",
+            status=RunStatus.RUNNING,
+            scope=run_scope,
+            revision=1,
+            started_at=NOW,
+        )
+    )
+    factory = CanonicalMemoryFacadeFactory(bundle=bundle, owner_scope=OWNER)
+    memory = factory.for_public_execution(
+        StorageScope(session_id="s1", user_id="local", org_id="local"),
+        logical_scope_id="session:s1",
+    )
+    await memory.append_state_snapshot(
+        "cp", {"summary": "persisted under exact identity"}, kind="test.checkpoint"
+    )
+    await bundle.close()
+    reader = open_observability_workspace(tmp_path)
+    try:
+        assert await reader.read_memory_state(
+            session_id="s1", key="cp", kind="test.checkpoint", owner_run_id="r1"
+        ) == {"summary": "persisted under exact identity"}
+        assert (
+            await reader.read_memory_state(
+                session_id="other-session", key="cp", kind="test.checkpoint", owner_run_id="r1"
+            )
+            is None
+        )
+        assert (
+            await reader.read_memory_state(
+                session_id="s1",
+                key="cp",
+                kind="test.checkpoint",
+                owner_run_id="r1",
+                memory_scope={"session_id": "other-session"},
+            )
+            is None
+        )
+    finally:
+        await reader.close()
