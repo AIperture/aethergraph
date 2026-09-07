@@ -306,6 +306,7 @@ def _openai_like_checkpoint(
         "state": "pending_tool_outputs",
         "tool_contract_fingerprint": tool_call_request_fingerprint(request),
         "prompt_message_count": len(stable_messages),
+        "root_message_count": (previous.opaque_payload["root_message_count"] if previous is not None else len(stable_messages)),
         "prompt_digest": prompt_digest,
         "replay_messages": list(replay_messages),
         "pending_call_ids": list(pending_call_ids),
@@ -406,9 +407,9 @@ def _openai_like_checkpoint_payload(
             code="model_exchange_tool_contract_changed",
             message="Chat Completions Tool checkpoint contract changed.",
         )
-    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
-        "prompt_digest"
-    ) != _openai_like_messages_digest(stable_messages):
+    prior_count = payload.get("prompt_message_count")
+    if (not isinstance(prior_count, int) or prior_count < 0 or prior_count > len(stable_messages)
+        or payload.get("prompt_digest") != _openai_like_messages_digest(stable_messages[:prior_count])):
         raise LLMToolCallResponseError(
             code="prompt_continuation_diverged",
             message="Chat Completions Tool checkpoint prompt changed.",
@@ -552,8 +553,8 @@ def _openai_like_continuation_messages(
         }
         for call_id in pending_call_ids
     )
-    replay = (*replay_messages, *result_messages)
-    return [*messages, *replay], replay
+    replay = (*replay_messages, *result_messages, *messages[payload["prompt_message_count"]:])
+    return [*messages[:payload["root_message_count"]], *replay], replay
 
 
 async def _stream_openai_like_chat_completions(

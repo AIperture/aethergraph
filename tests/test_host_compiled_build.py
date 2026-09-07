@@ -23,7 +23,7 @@ def _write_build(parent: Path) -> Path:
     generated.parent.mkdir(parents=True)
     generated.write_text("VALUE = 1\n", encoding="utf-8")
     resolved = {
-        "schema_version": "aethergraph.resolved-system/v12",
+        "schema_version": "aethergraph.resolved-system/v13",
         "semantic_event_protocol_version": SEMANTIC_EVENT_PROTOCOL_VERSION,
         "logical_output_requirements": ["origin"],
         "source_digest": "a" * 64,
@@ -48,7 +48,7 @@ def _write_build(parent: Path) -> Path:
             }
         )
     manifest = {
-        "schema_version": "aethergraph.compiled-system-manifest/v15",
+        "schema_version": "aethergraph.compiled-system-manifest/v16",
         "build_id": build_id,
         "package_name": "demo_compiled",
         "entrypoint_module": "demo_compiled.entry",

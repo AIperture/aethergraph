@@ -21,6 +21,11 @@ from .capabilities import (
     resolve_image_generation_profile,
     resolve_model_request,
 )
+from .context_management import (
+    MODEL_CONTEXT_CHECKPOINT_VERSION,
+    ModelContextCheckpoint,
+    ModelContextManagement,
+)
 from .contracts import (
     MODEL_REQUEST_CONTRACT_VERSION,
     ChatMessage,
@@ -231,6 +236,9 @@ __all__ = [
     "ModelOperationRunQuotaUnverifiableError",
     "ModelOperationRunQuotaWouldExceedError",
     "ModelCapabilityName",
+    "MODEL_CONTEXT_CHECKPOINT_VERSION",
+    "ModelContextCheckpoint",
+    "ModelContextManagement",
     "LLMStructuredOutputCapabilityError",
     "LLMStructuredOutputError",
     "LLMStructuredOutputParseError",

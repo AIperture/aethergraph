@@ -13,6 +13,7 @@ from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import (
     LLMToolCallCapabilityError,
     LLMToolCallResponseError,
+    ModelContextManagement,
     ModelRequest,
     PromptCacheRequest,
     StructuredOutputRequest,
@@ -3536,3 +3537,176 @@ async def test_chat_uses_profile_reasoning_effort_when_call_omits_it() -> None:
     assert fake_http.last_json is not None
     assert fake_http.last_json["reasoning_effort"] == "max"
     assert "thinking" not in fake_http.last_json
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_server_compaction_returns_replayable_checkpoint() -> None:
+    payload = {
+        "id": "resp_compacted",
+        "status": "completed",
+        "output": [
+            {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque"},
+            {
+                "type": "message",
+                "id": "msg_1",
+                "content": [{"type": "output_text", "text": "Done."}],
+            },
+        ],
+        "usage": {"input_tokens": 100, "output_tokens": 10},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-5.2", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    first_messages = (message_from_text("user", "Start"),)
+
+    first = await client.generate(
+        ModelRequest(
+            messages=first_messages,
+            context_management=ModelContextManagement(trigger_tokens=80_000),
+        )
+    )
+
+    assert first.text == "Done."
+    assert first.context_checkpoint is not None
+    assert first.provider_metadata["context_compacted"] is True
+    assert fake_http.last_json["context_management"] == [
+        {"type": "compaction", "compact_threshold": 80_000}
+    ]
+
+    fake_http.payload = {
+        "id": "resp_next",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_2",
+                "content": [{"type": "output_text", "text": "Next."}],
+            }
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 2},
+    }
+    second = await client.generate(
+        ModelRequest(
+            messages=(*first_messages, message_from_text("user", "Continue")),
+            context_management=ModelContextManagement(trigger_tokens=80_000),
+            context_checkpoint=first.context_checkpoint,
+        )
+    )
+    assert fake_http.last_json["input"][0]["type"] == "compaction"
+    assert fake_http.last_json["input"][-1]["content"] == "Continue"
+    assert second.context_checkpoint == first.context_checkpoint
+
+    fake_http.payload = {
+        "id": "resp_compacted_again",
+        "status": "completed",
+        "output": [
+            {"type": "compaction", "id": "cmp_2", "encrypted_content": "opaque-2"},
+            {
+                "type": "message",
+                "id": "msg_3",
+                "content": [{"type": "output_text", "text": "Compacted again."}],
+            },
+        ],
+        "usage": {"input_tokens": 100, "output_tokens": 10},
+    }
+    third = await client.generate(
+        ModelRequest(
+            messages=(
+                *first_messages,
+                message_from_text("user", "Continue"),
+                message_from_text("user", "Continue again"),
+            ),
+            context_management=ModelContextManagement(trigger_tokens=80_000),
+            context_checkpoint=second.context_checkpoint,
+        )
+    )
+
+    assert third.context_checkpoint is not None
+    assert third.context_checkpoint.revision == 2
+    assert third.context_checkpoint.payload["compacted_input"][0] == {
+        "type": "compaction",
+        "id": "cmp_2",
+        "encrypted_content": "opaque-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_server_compaction_rejects_custom_instructions() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-5.2", api_key="test")
+    fake_http = _FakeHttpClient({})
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(ValueError, match="does not support custom instructions"):
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Start"),),
+                context_management=ModelContextManagement(
+                    trigger_tokens=80_000,
+                    instructions="Preserve exact identifiers.",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_server_compaction_aggregates_usage_and_preserves_block() -> None:
+    payload = {
+        "id": "msg_compacted",
+        "stop_reason": "end_turn",
+        "content": [
+            {"type": "compaction", "content": "<summary>state</summary>"},
+            {"type": "text", "text": "Done."},
+        ],
+        "usage": {
+            "input_tokens": 20,
+            "output_tokens": 5,
+            "iterations": [
+                {"type": "compaction", "input_tokens": 60_000, "output_tokens": 500},
+                {"type": "message", "input_tokens": 20, "output_tokens": 5},
+            ],
+        },
+    }
+    client = GenericLLMClient(provider="anthropic", model="claude-sonnet-5", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Start"),),
+            context_management=ModelContextManagement(trigger_tokens=50_000),
+        )
+    )
+
+    assert response.text == "Done."
+    assert response.context_checkpoint is not None
+    assert response.usage.total_input_tokens == 60_020
+    assert response.usage.output_tokens == 505
+    assert fake_http.last_headers["anthropic-beta"] == "compact-2026-01-12"
+    assert fake_http.last_json["context_management"]["edits"][0]["type"] == ("compact_20260112")
+
+
+@pytest.mark.asyncio
+async def test_anthropic_null_compaction_fails_visibly() -> None:
+    client = GenericLLMClient(provider="anthropic", model="claude-sonnet-5", api_key="test")
+    client._client = _FakeHttpClient(
+        {
+            "id": "msg_failed",
+            "stop_reason": "end_turn",
+            "content": [{"type": "compaction", "content": None}],
+            "usage": {"input_tokens": 50_000, "output_tokens": 1},
+        }
+    )  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Start"),),
+                context_management=ModelContextManagement(trigger_tokens=50_000),
+            )
+        )
+
+    assert raised.value.code == "server_context_compaction_failed"

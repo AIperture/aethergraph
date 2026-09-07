@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Literal, TypeAlias
 
+from .context_management import ModelContextCheckpoint, ModelContextManagement
 from .tool_calling import ModelToolSpec, ToolCallOutput, ToolChoice
 from .tool_discovery import (
     ModelContinuation,
@@ -345,6 +346,8 @@ class ModelRequest:
     response_format: ModelResponseFormat = "text"
     generation: GenerationOptions = field(default_factory=GenerationOptions)
     prompt_cache: PromptCacheRequest | None = None
+    context_management: ModelContextManagement | None = None
+    context_checkpoint: ModelContextCheckpoint | None = None
     continuation: ModelContinuation | None = None
     call_name: str | None = None
     caller_context: dict[str, Any] = field(default_factory=dict)
@@ -471,38 +474,35 @@ class ModelRequest:
             if self.continuation is None:
                 raise ValueError("model discovery result requires a continuation")
             if tool_outputs:
-                raise ValueError(
-                    "model discovery result cannot accompany ordinary Tool outputs"
-                )
-            if (
-                self.discovery_result.status == "completed"
-                and not set(self.discovery_result.tool_names).issubset(
-                    set(active_tool_names)
-                )
-            ):
-                raise ValueError(
-                    "completed model discovery result Tools must be active"
-                )
+                raise ValueError("model discovery result cannot accompany ordinary Tool outputs")
+            if self.discovery_result.status == "completed" and not set(
+                self.discovery_result.tool_names
+            ).issubset(set(active_tool_names)):
+                raise ValueError("completed model discovery result Tools must be active")
         if (
             self.continuation is not None
             and self.continuation.purpose == "pending_discovery_result"
             and self.discovery_result is None
         ):
-            raise ValueError(
-                "pending model discovery continuations require a discovery result"
-            )
+            raise ValueError("pending model discovery continuations require a discovery result")
         if (
             self.discovery_result is not None
             and self.continuation is not None
             and self.continuation.purpose != "pending_discovery_result"
         ):
-            raise ValueError(
-                "model discovery results require a pending discovery continuation"
-            )
+            raise ValueError("model discovery results require a pending discovery continuation")
         if not isinstance(self.generation, GenerationOptions):
             raise TypeError("model request generation must be GenerationOptions")
         if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCacheRequest):
             raise TypeError("model request prompt_cache must be PromptCacheRequest or None")
+        if self.context_management is not None and not isinstance(
+            self.context_management, ModelContextManagement
+        ):
+            raise TypeError("context_management must be ModelContextManagement")
+        if self.context_checkpoint is not None and not isinstance(
+            self.context_checkpoint, ModelContextCheckpoint
+        ):
+            raise TypeError("context_checkpoint must be ModelContextCheckpoint")
         if not (
             isinstance(self.response_format, StructuredOutputRequest)
             or self.response_format in ("text", "json_object", "raw")

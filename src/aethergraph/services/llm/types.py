@@ -91,7 +91,9 @@ class StructuredOutputRequest:
         if not isinstance(self.schema, dict):
             raise TypeError("structured output schema must be a JSON object")
         if self.validation_owner not in {"aethergraph", "caller"}:
-            raise ValueError("structured output validation_owner must be 'aethergraph' or 'caller'")
+            raise ValueError(
+                "structured output validation_owner must be 'aethergraph' or 'caller'"
+            )
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "schema", copy.deepcopy(self.schema))
 
@@ -184,11 +186,15 @@ class PromptCacheRequest:
         if not family:
             raise ValueError("prompt cache prefix_family must not be empty")
         if len(family) > 256:
-            raise ValueError("prompt cache prefix_family must be at most 256 characters")
+            raise ValueError(
+                "prompt cache prefix_family must be at most 256 characters"
+            )
         indexes = tuple(self.stable_message_indexes)
         if not indexes:
             raise ValueError("prompt cache stable_message_indexes must not be empty")
-        if any(isinstance(index, bool) or not isinstance(index, int) for index in indexes):
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) for index in indexes
+        ):
             raise TypeError("prompt cache message indexes must be integers")
         if any(index < 0 for index in indexes):
             raise ValueError("prompt cache message indexes must be non-negative")
@@ -212,7 +218,9 @@ class LLMError(RuntimeError):
 
 
 class LLMUnsupportedFeatureError(LLMError):
-    def __init__(self, provider: str, model: str | None, feature: str, detail: str | None = None):
+    def __init__(
+        self, provider: str, model: str | None, feature: str, detail: str | None = None
+    ):
         msg = f"Provider '{provider}' / model '{model or '?'}' does not support: {feature}"
         if detail:
             msg += f" ({detail})"
@@ -355,6 +363,7 @@ class LLMRequestEstimate:
     estimated_total_tokens: int
     context_window_tokens: int | None
     source: str
+    measurement_scope: str = "submitted_context_only"
 
 
 class LLMContextWindowExceededError(LLMError):
@@ -647,12 +656,16 @@ class EmbeddingUsage:
             or not isinstance(self.input_tokens, int)
             or self.input_tokens < 0
         ):
-            raise ValueError("embedding input_tokens must be a non-negative integer or None")
+            raise ValueError(
+                "embedding input_tokens must be a non-negative integer or None"
+            )
         if self.availability == "unavailable" and self.input_tokens is not None:
             raise ValueError("unavailable embedding usage cannot contain input tokens")
         if self.availability != "unavailable" and self.input_tokens is None:
             raise ValueError("available embedding usage requires input tokens")
-        object.__setattr__(self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw))
+        object.__setattr__(
+            self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw)
+        )
 
     @classmethod
     def from_provider_usage(cls, usage: dict[str, Any] | None) -> "EmbeddingUsage":
@@ -872,10 +885,14 @@ class ImageGenerationUsage:
             for value in (self.input_tokens, self.output_tokens, self.total_tokens)
         ):
             raise ValueError("unavailable image usage cannot contain token counters")
-        object.__setattr__(self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw))
+        object.__setattr__(
+            self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw)
+        )
 
     @classmethod
-    def from_provider_usage(cls, usage: dict[str, Any] | None) -> "ImageGenerationUsage":
+    def from_provider_usage(
+        cls, usage: dict[str, Any] | None
+    ) -> "ImageGenerationUsage":
         """Normalize one image-generation provider receipt.
 
         Intro:
@@ -916,7 +933,11 @@ class ImageGenerationUsage:
             raw, "output_tokens", "completion_tokens", "outputTokenCount"
         )
         total_tokens = _operation_usage_int(raw, "total_tokens", "totalTokenCount")
-        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        if (
+            total_tokens is None
+            and input_tokens is not None
+            and output_tokens is not None
+        ):
             total_tokens = input_tokens + output_tokens
         counters = (input_tokens, output_tokens, total_tokens)
         if all(value is None for value in counters):

@@ -32,6 +32,7 @@ ChatCapabilityName = Literal[
     "prompt_cache",
     "native_tool_search_hosted",
     "native_tool_search_client",
+    "server_context_compaction",
 ]
 EmbeddingCapabilityName = Literal["text_embeddings", "dimensions"]
 ImageGenerationCapabilityName = Literal["text_to_image", "image_editing", "multiple_outputs"]
@@ -79,6 +80,7 @@ class ResolvedChatCapabilities(CapabilityContract):
     prompt_cache: EffectiveCapability
     native_tool_search_hosted: EffectiveCapability
     native_tool_search_client: EffectiveCapability
+    server_context_compaction: EffectiveCapability
 
 
 class ResolvedEmbeddingCapabilities(CapabilityContract):
@@ -181,6 +183,7 @@ _CAPABILITY_NAMES: tuple[ChatCapabilityName, ...] = (
     "prompt_cache",
     "native_tool_search_hosted",
     "native_tool_search_client",
+    "server_context_compaction",
 )
 
 _ADAPTER_FLAGS: dict[ChatCapabilityName, str] = {
@@ -192,6 +195,7 @@ _ADAPTER_FLAGS: dict[ChatCapabilityName, str] = {
     "structured_output": "structured_output",
     "native_tool_search_hosted": "native_tool_search",
     "native_tool_search_client": "native_tool_search",
+    "server_context_compaction": "server_context_compaction",
 }
 
 _EMBEDDING_CAPABILITY_NAMES: tuple[EmbeddingCapabilityName, ...] = (
@@ -365,6 +369,13 @@ def resolve_chat_profile(
         profile.connection.endpoint_id,
         capability="prompt_cache",
     )
+    context_compaction_entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        "chat",
+        profile.connection.endpoint_id,
+        capability="server_context_compaction",
+    )
     catalog_states: dict[ChatCapabilityName, CapabilityState] = {
         name: "unknown" for name in _CAPABILITY_NAMES
     }
@@ -390,6 +401,13 @@ def resolve_chat_profile(
         catalog_states["prompt_cache"] = (
             "supported" if prompt_cache_entry.prompt_cache.mode != "unavailable" else "unsupported"
         )
+    if (
+        context_compaction_entry is not None
+        and context_compaction_entry.server_context_compaction is not None
+    ):
+        catalog_states["server_context_compaction"] = (
+            context_compaction_entry.server_context_compaction.state
+        )
     capability_entries = {
         "native_tool_calling": chat_tools_entry,
         "tool_result_continuation": chat_tools_entry,
@@ -398,6 +416,7 @@ def resolve_chat_profile(
         "prompt_cache": prompt_cache_entry,
         "native_tool_search_hosted": native_entry,
         "native_tool_search_client": native_entry,
+        "server_context_compaction": context_compaction_entry,
     }
     override_values = profile.capability_overrides.model_dump()
     effective: dict[str, EffectiveCapability] = {}
@@ -452,7 +471,13 @@ def resolve_chat_profile(
     catalog_entries = tuple(
         dict.fromkeys(
             item.catalog_key
-            for item in (native_entry, chat_tools_entry, structured_entry, prompt_cache_entry)
+            for item in (
+                native_entry,
+                chat_tools_entry,
+                structured_entry,
+                prompt_cache_entry,
+                context_compaction_entry,
+            )
             if item is not None
         )
     )

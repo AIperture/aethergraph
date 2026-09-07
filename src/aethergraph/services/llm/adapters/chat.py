@@ -10,7 +10,9 @@ from typing import Any
 from aethergraph.services.llm.adapters.anthropic import AnthropicMessagesAdapter
 from aethergraph.services.llm.adapters.azure import AzureChatAdapter
 from aethergraph.services.llm.adapters.gemini import GeminiGenerateContentAdapter
-from aethergraph.services.llm.adapters.openai_compatible import OpenAICompatibleChatAdapter
+from aethergraph.services.llm.adapters.openai_compatible import (
+    OpenAICompatibleChatAdapter,
+)
 from aethergraph.services.llm.adapters.openai_responses import OpenAIResponsesAdapter
 from aethergraph.services.llm.provider_transport import ProviderCallResult
 from aethergraph.services.llm.tool_calling import ToolCallRequest, ToolCallResponse
@@ -151,7 +153,9 @@ class ChatAdapterInvocation:
             "structured_output_fields",
             copy.deepcopy(self.structured_output_fields),
         )
-        object.__setattr__(self, "prompt_cache_fields", copy.deepcopy(self.prompt_cache_fields))
+        object.__setattr__(
+            self, "prompt_cache_fields", copy.deepcopy(self.prompt_cache_fields)
+        )
         object.__setattr__(self, "options", copy.deepcopy(self.options))
 
     def message_list(self) -> list[dict[str, Any]]:
@@ -217,7 +221,9 @@ class ChatAdapterInvocation:
         return copy.deepcopy(self.options)
 
 
-async def _invoke_openai_responses(host: Any, call: ChatAdapterInvocation) -> AdapterResult:
+async def _invoke_openai_responses(
+    host: Any, call: ChatAdapterInvocation
+) -> AdapterResult:
     """Invoke the exact OpenAI Responses adapter.
 
     Intro:
@@ -269,7 +275,9 @@ async def _invoke_openai_responses(host: Any, call: ChatAdapterInvocation) -> Ad
     )
 
 
-async def _invoke_chat_completions(host: Any, call: ChatAdapterInvocation) -> AdapterResult:
+async def _invoke_chat_completions(
+    host: Any, call: ChatAdapterInvocation
+) -> AdapterResult:
     """Invoke the shared OpenAI-compatible Chat Completions adapter.
 
     Intro:
@@ -321,7 +329,9 @@ async def _invoke_chat_completions(host: Any, call: ChatAdapterInvocation) -> Ad
     )
 
 
-async def _invoke_azure_responses(host: Any, call: ChatAdapterInvocation) -> AdapterResult:
+async def _invoke_azure_responses(
+    host: Any, call: ChatAdapterInvocation
+) -> AdapterResult:
     """Invoke the pinned Azure Responses native Tool adapter.
 
     Intro:
@@ -421,7 +431,9 @@ async def _invoke_azure_chat_completions(
     )
 
 
-async def _invoke_anthropic_messages(host: Any, call: ChatAdapterInvocation) -> AdapterResult:
+async def _invoke_anthropic_messages(
+    host: Any, call: ChatAdapterInvocation
+) -> AdapterResult:
     """Invoke the exact Anthropic Messages adapter.
 
     Intro:
@@ -536,6 +548,47 @@ _CHAT_ADAPTER_RUNTIMES: dict[str, AdapterHandler] = {
     "anthropic_messages": _invoke_anthropic_messages,
     "gemini_generate_content": _invoke_gemini_generate_content,
 }
+
+
+def project_context_tools(
+    adapter_id: str, request: ToolCallRequest
+) -> list[dict[str, Any]]:
+    """Reuse native declaration encoders to estimate loaded model context.
+
+    Deferred schemas remain available to discovery but do not occupy model
+    context until activated. This is an estimate projection, never wire input.
+    """
+    from .openai_responses import _openai_request_tools
+    from .openai_compatible import _openai_like_tool_definitions
+    from .anthropic import _anthropic_request_tools
+    from .gemini import _gemini_request_tools
+
+    if adapter_id in {"openai_responses", "azure_responses"}:
+        declarations = _openai_request_tools(request)
+    elif adapter_id in {"openai_chat_completions", "azure_chat_completions"}:
+        declarations = _openai_like_tool_definitions(request)
+    elif adapter_id == "anthropic_messages":
+        declarations = _anthropic_request_tools(request)
+    elif adapter_id == "gemini_generate_content":
+        declarations = _gemini_request_tools(request)
+    else:
+        raise ValueError(f"No context Tool projection for adapter {adapter_id!r}")
+    active = set(request.active_tool_names)
+
+    def loaded(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result = []
+        for value in values:
+            if value.get("defer_loading") and value.get("name") not in active:
+                continue
+            if value.get("type") == "namespace":
+                children = loaded(value["tools"])
+                if children:
+                    result.append({**value, "tools": children})
+            else:
+                result.append(value)
+        return result
+
+    return loaded(declarations)
 
 
 async def invoke_chat_adapter(
