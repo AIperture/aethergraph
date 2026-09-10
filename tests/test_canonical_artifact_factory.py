@@ -361,12 +361,21 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
 async def test_later_turn_adopts_same_session_agent_artifact_once(tmp_path: Path) -> None:
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)
+    artifact_ids = iter(
+        (
+            "artifact-session-result",
+            "artifact-session-directory",
+            "artifact-session-report",
+            "artifact-session-patched",
+        )
+    )
+    occurrence_ids = iter(f"occurrence-session-{index}" for index in range(4))
     factory = CanonicalArtifactFacadeFactory(
         bundle=bundle,
         owner_scope=_owner_scope(),
         clock=clock.now,
-        artifact_id_factory=lambda: "artifact-session-result",
-        occurrence_id_factory=lambda: "occurrence-session-result",
+        artifact_id_factory=lambda: next(artifact_ids),
+        occurrence_id_factory=lambda: next(occurrence_ids),
     )
     session_scope = StorageScope(
         **_owner_scope().as_filter(),
@@ -429,9 +438,22 @@ async def test_later_turn_adopts_same_session_agent_artifact_once(tmp_path: Path
         )
     )
     try:
+        source_dir = tmp_path / "cross-turn-directory"
+        source_dir.mkdir()
+        (source_dir / "values.json").write_text('{"value": 7}', encoding="utf-8")
         saved = await producer.save_json(
             {"status": "ready", "result_ids": ["result-1"]},
             name="result.json",
+        )
+        directory = await producer.save_directory(
+            source_dir.as_posix(),
+            name="results.tar",
+        )
+        report = await producer.save_text(
+            "# Final report\n\nValue: 7",
+            kind="report",
+            name="report.md",
+            pin=True,
         )
 
         assert await consumer.load_json_by_id(saved.artifact_id) == {
@@ -442,9 +464,24 @@ async def test_later_turn_adopts_same_session_agent_artifact_once(tmp_path: Path
             "status": "ready",
             "result_ids": ["result-1"],
         }
+        assert await consumer.load_text_by_id(report.artifact_id) == ("# Final report\n\nValue: 7")
+        destination = tmp_path / "cross-turn-materialized"
+        await consumer.materialize_directory(directory.artifact_id, destination.as_posix())
+        assert (destination / "values.json").read_text(encoding="utf-8") == '{"value": 7}'
+        patched = await consumer.save_json(
+            {"status": "corrected", "source_artifact_id": saved.artifact_id},
+            name="result.corrected.json",
+        )
+        assert patched.artifact_id != saved.artifact_id
+        assert patched.sha256 != saved.sha256
+        assert (await producer.get_by_id(saved.artifact_id)).sha256 == saved.sha256
         adopted = await consumer.canonical.list_occurrences(artifact_id=saved.artifact_id)
         assert len(adopted.items) == 1
         assert adopted.items[0].labels["admission"] == "same_session_agent"
+        for artifact_id in (directory.artifact_id, report.artifact_id):
+            occurrences = await consumer.canonical.list_occurrences(artifact_id=artifact_id)
+            assert len(occurrences.items) == 1
+            assert occurrences.items[0].labels["admission"] == "same_session_agent"
         assert await unrelated.get_by_id(saved.artifact_id) is None
     finally:
         await bundle.close()
