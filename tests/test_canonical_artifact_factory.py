@@ -358,6 +358,99 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_later_turn_adopts_same_session_agent_artifact_once(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: "artifact-session-result",
+        occurrence_id_factory=lambda: "occurrence-session-result",
+    )
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        user_id="user-1",
+        session_id="session-1",
+    )
+    first_run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-1",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    second_run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-2",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    await bundle.sessions.create(
+        SessionRecord(
+            session_id="session-1",
+            kind=SessionKind.CHAT,
+            scope=session_scope,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    for run_scope in (first_run_scope, second_run_scope):
+        await bundle.runs.create(
+            RunRecord(
+                run_id=run_scope.run_id or "",
+                graph_id="graph-1",
+                kind="graphfn",
+                status=RunStatus.RUNNING,
+                scope=run_scope,
+                revision=1,
+                started_at=NOW,
+            )
+        )
+    producer = factory.for_public_execution(
+        StorageScope(
+            **first_run_scope.as_filter(),
+            node_id="producer",
+        )
+    )
+    consumer = factory.for_public_execution(
+        StorageScope(
+            **second_run_scope.as_filter(),
+            node_id="consumer",
+        )
+    )
+    unrelated = factory.for_public_execution(
+        StorageScope(
+            **{
+                **second_run_scope.as_filter(),
+                "node_id": "other-agent",
+                "agent_id": "agent-2",
+            }
+        )
+    )
+    try:
+        saved = await producer.save_json(
+            {"status": "ready", "result_ids": ["result-1"]},
+            name="result.json",
+        )
+
+        assert await consumer.load_json_by_id(saved.artifact_id) == {
+            "status": "ready",
+            "result_ids": ["result-1"],
+        }
+        assert await consumer.load_json_by_id(saved.artifact_id) == {
+            "status": "ready",
+            "result_ids": ["result-1"],
+        }
+        adopted = await consumer.canonical.list_occurrences(artifact_id=saved.artifact_id)
+        assert len(adopted.items) == 1
+        assert adopted.items[0].labels["admission"] == "same_session_agent"
+        assert await unrelated.get_by_id(saved.artifact_id) is None
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_child_agent_can_commit_artifact_to_ingress_owned_run(tmp_path: Path) -> None:
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)
