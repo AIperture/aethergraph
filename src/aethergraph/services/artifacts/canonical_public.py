@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+import hashlib
 import ipaddress
 import json
 import mimetypes
@@ -23,6 +24,7 @@ from aethergraph.storage.contracts import (
     Page,
     PageRequest,
     SearchMode,
+    StorageNotFoundError,
     StorageScope,
 )
 
@@ -842,11 +844,63 @@ class CanonicalPublicArtifactFacade:
         Notes:
             A miss never consults search metadata, a provider locator, or legacy index.
         """
-        return await self.canonical.get_public(
+        artifact = await self.canonical.get_public(
             artifact_id,
             scope=occurrence_scope,
             deprecated_app_id=self._deprecated_app_id,
         )
+        if artifact is not None or occurrence_scope is not None:
+            return artifact
+        if await self._admit_same_session_artifact(artifact_id):
+            return await self.canonical.get_public(
+                artifact_id,
+                deprecated_app_id=self._deprecated_app_id,
+            )
+        return None
+
+    async def _admit_same_session_artifact(self, artifact_id: str) -> bool:
+        """Adopt a prior same-agent session occurrence into this execution."""
+
+        session_id = self.scope.session_id
+        run_id = self.scope.run_id
+        if not session_id or not run_id:
+            return False
+        dimensions: dict[str, str] = {"session_id": session_id}
+        if self.scope.agent_id:
+            dimensions["agent_id"] = self.scope.agent_id
+        source_page = await self.canonical.query_occurrences(
+            PageRequest(limit=1),
+            scope=StorageScope(**dimensions),
+            artifact_id=artifact_id,
+        )
+        if not source_page.items:
+            return False
+        source = source_page.items[0]
+        target_identity = json.dumps(
+            {
+                "artifact_id": artifact_id,
+                "scope": self.scope.as_filter(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        occurrence_id = (
+            "occurrence-session-admission-"
+            + hashlib.sha256(target_identity.encode("utf-8")).hexdigest()[:32]
+        )
+        try:
+            await self.canonical.attach_existing(
+                artifact_id,
+                occurrence_id=occurrence_id,
+                labels={
+                    "admission": "same_session_agent",
+                    "source_occurrence_id": source.occurrence_id,
+                    "source_run_id": source.scope.run_id,
+                },
+            )
+        except StorageNotFoundError:
+            return False
+        return True
 
     async def load_bytes_by_id(
         self,

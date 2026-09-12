@@ -358,6 +358,233 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_later_turn_adopts_same_session_agent_artifact_once(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    artifact_ids = iter(
+        (
+            "artifact-session-result",
+            "artifact-session-directory",
+            "artifact-session-report",
+            "artifact-session-patched",
+        )
+    )
+    occurrence_ids = iter(f"occurrence-session-{index}" for index in range(4))
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: next(artifact_ids),
+        occurrence_id_factory=lambda: next(occurrence_ids),
+    )
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        user_id="user-1",
+        session_id="session-1",
+    )
+    first_run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-1",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    second_run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-2",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    await bundle.sessions.create(
+        SessionRecord(
+            session_id="session-1",
+            kind=SessionKind.CHAT,
+            scope=session_scope,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    for run_scope in (first_run_scope, second_run_scope):
+        await bundle.runs.create(
+            RunRecord(
+                run_id=run_scope.run_id or "",
+                graph_id="graph-1",
+                kind="graphfn",
+                status=RunStatus.RUNNING,
+                scope=run_scope,
+                revision=1,
+                started_at=NOW,
+            )
+        )
+    producer = factory.for_public_execution(
+        StorageScope(
+            **first_run_scope.as_filter(),
+            node_id="producer",
+        )
+    )
+    consumer = factory.for_public_execution(
+        StorageScope(
+            **second_run_scope.as_filter(),
+            node_id="consumer",
+        )
+    )
+    unrelated = factory.for_public_execution(
+        StorageScope(
+            **{
+                **second_run_scope.as_filter(),
+                "node_id": "other-agent",
+                "agent_id": "agent-2",
+            }
+        )
+    )
+    try:
+        source_dir = tmp_path / "cross-turn-directory"
+        source_dir.mkdir()
+        (source_dir / "values.json").write_text('{"value": 7}', encoding="utf-8")
+        saved = await producer.save_json(
+            {"status": "ready", "result_ids": ["result-1"]},
+            name="result.json",
+        )
+        directory = await producer.save_directory(
+            source_dir.as_posix(),
+            name="results.tar",
+        )
+        report = await producer.save_text(
+            "# Final report\n\nValue: 7",
+            kind="report",
+            name="report.md",
+            pin=True,
+        )
+
+        assert await consumer.load_json_by_id(saved.artifact_id) == {
+            "status": "ready",
+            "result_ids": ["result-1"],
+        }
+        assert await consumer.load_json_by_id(saved.artifact_id) == {
+            "status": "ready",
+            "result_ids": ["result-1"],
+        }
+        assert await consumer.load_text_by_id(report.artifact_id) == ("# Final report\n\nValue: 7")
+        destination = tmp_path / "cross-turn-materialized"
+        await consumer.materialize_directory(directory.artifact_id, destination.as_posix())
+        assert (destination / "values.json").read_text(encoding="utf-8") == '{"value": 7}'
+        patched = await consumer.save_json(
+            {"status": "corrected", "source_artifact_id": saved.artifact_id},
+            name="result.corrected.json",
+        )
+        assert patched.artifact_id != saved.artifact_id
+        assert patched.sha256 != saved.sha256
+        assert (await producer.get_by_id(saved.artifact_id)).sha256 == saved.sha256
+        adopted = await consumer.canonical.list_occurrences(artifact_id=saved.artifact_id)
+        assert len(adopted.items) == 1
+        assert adopted.items[0].labels["admission"] == "same_session_agent"
+        for artifact_id in (directory.artifact_id, report.artifact_id):
+            occurrences = await consumer.canonical.list_occurrences(artifact_id=artifact_id)
+            assert len(occurrences.items) == 1
+            assert occurrences.items[0].labels["admission"] == "same_session_agent"
+        assert await unrelated.get_by_id(saved.artifact_id) is None
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_same_session_artifact_admission_survives_provider_reopen(
+    tmp_path: Path,
+) -> None:
+    """A worker/provider restart must not change canonical session admission."""
+
+    clock = _Clock()
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        user_id="user-1",
+        session_id="session-restart",
+    )
+    first_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-before-restart",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: "artifact-before-restart",
+        occurrence_id_factory=lambda: "occurrence-before-restart",
+    )
+    await bundle.sessions.create(
+        SessionRecord(
+            session_id="session-restart",
+            kind=SessionKind.CHAT,
+            scope=session_scope,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="run-before-restart",
+            graph_id="graph-1",
+            kind="graphfn",
+            status=RunStatus.SUCCEEDED,
+            scope=first_scope,
+            revision=1,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+    )
+    producer = factory.for_public_execution(
+        StorageScope(**first_scope.as_filter(), node_id="producer")
+    )
+    saved = await producer.save_json({"stable": True}, name="stable.json", pin=True)
+    await bundle.close()
+
+    reopened = _open_bundle(tmp_path, clock)
+    restarted_factory = CanonicalArtifactFacadeFactory(
+        bundle=reopened,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        occurrence_id_factory=lambda: "occurrence-after-restart",
+    )
+    second_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-after-restart",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    try:
+        await reopened.runs.create(
+            RunRecord(
+                run_id="run-after-restart",
+                graph_id="graph-1",
+                kind="graphfn",
+                status=RunStatus.RUNNING,
+                scope=second_scope,
+                revision=1,
+                started_at=clock.now(),
+            )
+        )
+        consumer = restarted_factory.for_public_execution(
+            StorageScope(**second_scope.as_filter(), node_id="consumer")
+        )
+
+        assert await consumer.load_json_by_id(saved.artifact_id) == {"stable": True}
+        restored = await consumer.get_by_id(saved.artifact_id)
+        assert restored is not None
+        assert restored.artifact_id == saved.artifact_id
+        assert restored.sha256 == saved.sha256
+        assert restored.pinned is True
+        occurrences = await consumer.canonical.list_occurrences(artifact_id=saved.artifact_id)
+        assert len(occurrences.items) == 1
+        assert occurrences.items[0].occurrence_id.startswith("occurrence-session-admission-")
+        assert occurrences.items[0].labels["admission"] == "same_session_agent"
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_child_agent_can_commit_artifact_to_ingress_owned_run(tmp_path: Path) -> None:
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)

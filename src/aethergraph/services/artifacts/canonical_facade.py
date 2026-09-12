@@ -1258,7 +1258,7 @@ class CanonicalArtifactFacade:
         artifact_id: str,
         *,
         occurrence_id: str,
-        occurred_at: datetime,
+        occurred_at: datetime | None = None,
         labels: Mapping[str, Any] | None = None,
     ) -> ArtifactOccurrence:
         """Attach existing canonical content to this execution scope.
@@ -1289,7 +1289,8 @@ class CanonicalArtifactFacade:
         Args:
             artifact_id: Existing canonical artifact identity owned by this facade.
             occurrence_id: Stable idempotency identity for the execution occurrence.
-            occurred_at: Stable UTC admission time, normally the run start time.
+            occurred_at: Optional stable UTC admission time, normally the run start
+                time. The facade clock supplies the time when omitted.
             labels: Optional immutable occurrence provenance without content bytes.
 
         Returns:
@@ -1304,7 +1305,7 @@ class CanonicalArtifactFacade:
             artifact_id=artifact_id,
             scope=self.execution_scope,
             action=ArtifactAction.ATTACHED,
-            occurred_at=occurred_at,
+            occurred_at=occurred_at or self._clock(),
             tool_name=self.tool_name,
             tool_version=self.tool_version,
             labels=_canonical_artifact_labels("labels", labels),
