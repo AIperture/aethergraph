@@ -141,7 +141,7 @@ def test_embedding_resolve_api_returns_exact_capability_binding() -> None:
     assert payload["binding"]["capabilities"]["dimensions"]["state"] == "supported"
 
 
-def test_image_resolve_api_reports_adapter_clamped_capability() -> None:
+def test_image_resolve_api_reports_implemented_edit_capability() -> None:
     with _client() as client:
         response = client.post(
             "/api/v1/llm/resolve/image-generation",
@@ -156,9 +156,9 @@ def test_image_resolve_api_reports_adapter_clamped_capability() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["schema_version"] == "aethergraph.image-resolve-response/v1"
-    assert payload["valid"] is False
+    assert payload["valid"] is True
     assert payload["binding"]["endpoint_id"] == "openai_images"
-    assert payload["binding"]["capabilities"]["image_editing"]["state"] == "unsupported"
+    assert payload["binding"]["capabilities"]["image_editing"]["state"] == "supported"
 
 
 def test_operation_resolve_apis_reject_cross_operation_endpoints() -> None:

@@ -428,8 +428,26 @@ class NodeContext:
         """
         return ChannelSession(self, channel_key)
 
-    # New way: prefer memory_facade directly
-    def memory(self) -> CanonicalPublicMemoryFacade:
+    def memory(self, *, level: ScopeLevel | None = None) -> CanonicalPublicMemoryFacade:
+        """Return bound memory, or explicitly select a level from trusted identity.
+
+        Examples:
+            `await context.memory(level="user").query_events(limit=10, use_persistence=True)`.
+
+        Args:
+            level: Explicit scope level; omission preserves the runtime's bound facade.
+
+        Returns:
+            CanonicalPublicMemoryFacade: Memory in the existing canonical bundle.
+
+        Notes:
+            Cross-session visibility requires the same durable storage bundle and
+            trusted user/org identity. This does not extend the host's store lifetime.
+        """
+        if level is not None:
+            if self.scope is None or self.services.memory is None:
+                raise RuntimeError("Trusted memory scope/factory not bound")
+            return self.services.memory.for_runtime_scope(self.scope, level=level, projection_logger=self.logger())
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade

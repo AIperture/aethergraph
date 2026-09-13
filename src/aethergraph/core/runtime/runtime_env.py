@@ -12,6 +12,7 @@ from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.container.default_container import DefaultContainer, get_container
 
 # ---- memory services ----
+from aethergraph.services.memory.canonical_factory import canonical_memory_scope
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.runner.facade import RunFacade
@@ -40,34 +41,6 @@ def _canonical_scope(scope: Any) -> StorageScope:
     )
 
 
-def _canonical_memory_scope(scope: Any) -> StorageScope:
-    common = {
-        "org_id": getattr(scope, "org_id", None),
-        "user_id": getattr(scope, "user_id", None),
-    }
-    custom_scope = getattr(scope, "_memory_scope_id", None)
-    if custom_scope:
-        return StorageScope(**common, scope_key=custom_scope)
-    level = getattr(scope, "memory_level", None)
-    if level == "session":
-        return StorageScope(**common, session_id=getattr(scope, "session_id", None))
-    if level == "run":
-        return StorageScope(**common, run_id=getattr(scope, "run_id", None))
-    if level == "user":
-        return StorageScope(**common)
-    if level == "org":
-        return StorageScope(org_id=getattr(scope, "org_id", None))
-    if level == "scope":
-        return StorageScope()
-    if getattr(scope, "session_id", None):
-        return StorageScope(**common, session_id=scope.session_id)
-    if getattr(scope, "user_id", None):
-        return StorageScope(**common)
-    if getattr(scope, "run_id", None):
-        return StorageScope(**common, run_id=scope.run_id)
-    if getattr(scope, "org_id", None):
-        return StorageScope(org_id=scope.org_id)
-    return StorageScope()
 
 
 @dataclass
@@ -185,7 +158,7 @@ class RuntimeEnv:
 
         if mem_scope is None or node_scope is None:
             raise RuntimeError("RuntimeEnv requires a scope factory for canonical storage")
-        memory_storage_scope = _canonical_memory_scope(mem_scope)
+        memory_storage_scope = canonical_memory_scope(mem_scope)
         memory_provenance_scope = _canonical_scope(mem_scope)
         node_storage_scope = _canonical_scope(node_scope)
         mem = self.memory_factory.for_public_execution(
