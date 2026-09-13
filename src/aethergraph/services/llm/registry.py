@@ -224,13 +224,13 @@ _ENDPOINTS = (
         "openai_images",
         "openai.images",
         ("image_generation",),
-        ("text_to_image", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
+        ("text_to_image", "image_editing", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "azure_images",
         "azure.images",
         ("image_generation",),
-        ("text_to_image", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
+        ("text_to_image", "image_editing", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "gemini_image_generation",

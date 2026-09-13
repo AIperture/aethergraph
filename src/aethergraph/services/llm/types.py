@@ -224,6 +224,10 @@ class LLMUnsupportedFeatureError(LLMError):
         msg = f"Provider '{provider}' / model '{model or '?'}' does not support: {feature}"
         if detail:
             msg += f" ({detail})"
+        self.provider = provider
+        self.model = model
+        self.feature = feature
+        self.detail = detail
         super().__init__(msg)
 
 

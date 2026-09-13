@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from typing import Any
 
@@ -19,12 +20,14 @@ from aethergraph.services.llm.http_lifecycle import (
     _ensure_loop_http_client,
 )
 from aethergraph.services.llm.image_runtime import _execute_image_generation
+from aethergraph.services.llm.media import ImagePreparationPolicy, prepare_image_inputs
 from aethergraph.services.llm.operation_quota import image_generation_quota_ledger
 from aethergraph.services.llm.operation_runtime import model_operation_dimensions
 from aethergraph.services.llm.profiles import (
     ImageGenerationCapabilityOverrides,
     ImageGenerationProfile,
     ModelSelection,
+    MultimodalInputPolicy,
     ProviderConnection,
 )
 from aethergraph.services.llm.provider_transport import (
@@ -40,6 +43,7 @@ from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
     ImageGenerationUsage,
+    ImageInput,
     ImageResponseFormat,
     LLMUnsupportedFeatureError,
 )
@@ -73,6 +77,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         profile_name: str | None = None,
         capability_overrides: ImageGenerationCapabilityOverrides | None = None,
         catalog_key: str | None = None,
+        input_policy: MultimodalInputPolicy | None = None,
     ) -> None:
         """Create an independently configured image-generation client.
 
@@ -165,6 +170,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         self.capability_overrides = (
             capability_overrides or ImageGenerationCapabilityOverrides()
         )
+        self.input_policy = input_policy or MultimodalInputPolicy(image_input_enabled=True)
         self.catalog_key = catalog_key
         self._provider_retry = ProviderRetryExecutor(
             retry_settings,
@@ -224,7 +230,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         output_format: ImageFormat | None = None,
         response_format: ImageResponseFormat | None = None,
         background: str | None = None,
-        input_images: list[str] | None = None,
+        input_images: list[ImageInput | str] | None = None,
         azure_api_version: str | None = None,
         **kw: Any,
     ) -> ImageGenerationResult:
@@ -263,7 +269,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             output_format: Optional encoded format overriding the profile default.
             response_format: Optional transport format overriding the profile default.
             background: Optional background mode overriding the profile default.
-            input_images: Optional source-image data URLs.
+            input_images: Canonical inline images or source-image data URLs.
             azure_api_version: Optional Azure Images API version.
             **kw: Bounded adapter-private options.
 
@@ -291,7 +297,10 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
                 else response_format
             ),
             background=self.default_background if background is None else background,
-            input_images=tuple(input_images or ()),
+            input_images=tuple(
+                ImageInput(url=item) if isinstance(item, str) else item
+                for item in (input_images or ())
+            ),
             azure_api_version=azure_api_version,
             options=kw,
         )
@@ -323,6 +332,16 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
                 invocation.model,
                 diagnostic.capability,
                 diagnostic.message,
+            )
+        if invocation.input_images:
+            if any(image.url and not image.url.startswith("data:") or image.is_file_uri for image in invocation.input_images):
+                raise LLMUnsupportedFeatureError(self.provider, invocation.model, "image_source", "Image editing requires inline bytes or data URLs")
+            invocation = replace(
+                invocation,
+                input_images=prepare_image_inputs(
+                    invocation.input_images,
+                    policy=ImagePreparationPolicy.from_multimodal_input(self.input_policy),
+                ),
             )
         return await _execute_image_generation(
             self,

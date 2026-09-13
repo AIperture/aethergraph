@@ -5,12 +5,32 @@ including per-call model changes and multiple output requests. Explicit profile 
 are required for uncataloged models; provider names do not establish model support.
 Configured capability overrides and catalog keys are preserved by the image factory.
 
-At this implementation stage, OpenAI and Azure image-edit transports are not implemented:
-nonempty `input_images` raise `LLMUnsupportedFeatureError` rather than becoming a
-prompt-only generation request. An override cannot bypass the adapter restriction.
-Gemini retains its implemented reference-image transport; common options the adapter
-cannot project are rejected, including non-default output count, size and quality.
-There is no automatic endpoint/model switch or text-only retry.
+OpenAI and Azure image profiles support reference-image edits through their existing
+image adapter and `/images/edits` multipart transport. Pass canonical `ImagePart`
+objects (the public alias for `ImageInput`) or inline data URLs to
+`context.image_model(profile=...).generate_image(..., input_images=[...])`.
+The selected profile's `input_policy` bounds count, decoded bytes, dimensions and
+normalization through AG's existing media preparer. Image profiles enable this
+policy by default; Chat profiles retain their explicit opt-in. Remote URLs and
+provider file references are not admitted by the image-generation API.
+
+OpenAI/Azure edits reject options that cannot be projected, including `style` and
+`response_format`; unknown extra options fail explicitly. Gemini uses the same
+prepared canonical image inputs, with its existing inline image transport; its
+unsupported count, size and quality options remain explicit errors. There is no
+automatic endpoint/model substitution or text-only retry. Unknown model capability
+facts still require an explicit profile declaration.
+
+`LLMUnsupportedFeatureError` exposes `provider`, `model`, `feature` and `detail`.
+Malformed/oversized raster inputs raise `MediaPreparationError` before HTTP I/O.
+A supported catalog fact is necessary but does not override adapter or input-policy
+restrictions. Image outputs continue through the existing canonical artifact owner.
+
+Transport specifications: [OpenAI image edits](https://developers.openai.com/api/reference/resources/images/methods/edit)
+and [Azure image generation and editing](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/dall-e).
+Regression tests inspect real multipart HTTP requests with ordered PNG bytes and
+exact endpoints. They do not certify live credentials, deployment availability or
+visual reference fidelity.
 
 Legacy `chat` and `chat_stream` validate content shapes even without a managed image
 policy. Canonical text/images are supported according to the selected profile.

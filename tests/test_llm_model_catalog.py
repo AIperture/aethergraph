@@ -638,9 +638,9 @@ def test_image_resolution_exposes_catalog_truth_and_adapter_clamps() -> None:
 
     assert openai_binding.capabilities.text_to_image.state == "supported"
     assert openai_binding.capabilities.multiple_outputs.state == "supported"
-    assert openai_binding.capabilities.image_editing.state == "unsupported"
-    assert openai_binding.capabilities.image_editing.provenance[-1].source == "adapter"
-    assert not openai_binding.valid
+    assert openai_binding.capabilities.image_editing.state == "supported"
+    assert openai_binding.capabilities.image_editing.provenance[0].source == "catalog"
+    assert openai_binding.valid
     assert google_binding.capabilities.text_to_image.state == "supported"
     assert google_binding.capabilities.image_editing.state == "supported"
     assert google_binding.capabilities.multiple_outputs.state == "unsupported"
@@ -668,8 +668,8 @@ def test_gpt_image_2_resolves_required_generation_capabilities(model: str) -> No
     assert binding.catalog_key == "openai/gpt-image-2/v5"
     assert binding.capabilities.text_to_image.state == "supported"
     assert binding.capabilities.multiple_outputs.state == "supported"
-    assert binding.capabilities.image_editing.state == "unsupported"
-    assert binding.capabilities.image_editing.provenance[-1].source == "adapter"
+    assert binding.capabilities.image_editing.state == "supported"
+    assert binding.capabilities.image_editing.provenance[0].source == "catalog"
 
 
 def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation() -> None:
@@ -686,7 +686,7 @@ def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation
 
     assert binding.valid
     assert binding.catalog_key is None
-    assert binding.capabilities.image_editing.state == "unsupported"
+    assert binding.capabilities.image_editing.state == "unknown"
     assert binding.capabilities.image_editing.provenance[0].source == "unknown"
 
     without_override = resolve_image_generation_profile(

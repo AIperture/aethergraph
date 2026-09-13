@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Awaitable, Callable
 import copy
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from aethergraph.services.llm.provider_transport import ProviderCallResult
 from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
+    ImageInput,
     ImageResponseFormat,
     LLMUnsupportedFeatureError,
 )
@@ -96,7 +98,7 @@ class ImageAdapterInvocation:
     output_format: ImageFormat | None
     response_format: ImageResponseFormat | None
     background: str | None
-    input_images: tuple[str, ...]
+    input_images: tuple[ImageInput, ...]
     azure_api_version: str | None
     options: dict[str, Any] = field(default_factory=dict)
 
@@ -164,11 +166,13 @@ class ImageAdapterInvocation:
             raise ValueError("image adapter invocation requires a model")
         if isinstance(self.n, bool) or int(self.n) < 1:
             raise ValueError("image adapter invocation requires n >= 1")
+        if any(not isinstance(image, ImageInput) for image in self.input_images):
+            raise TypeError("input_images must contain ImageInput values or data URL strings")
         object.__setattr__(self, "prompt", prompt)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "n", int(self.n))
         object.__setattr__(
-            self, "input_images", tuple(str(item) for item in self.input_images)
+            self, "input_images", tuple(copy.deepcopy(item) for item in self.input_images)
         )
         object.__setattr__(self, "options", copy.deepcopy(self.options))
 
@@ -205,13 +209,6 @@ class ImageAdapterInvocation:
 async def _invoke_openai_images(
     host: Any, invocation: ImageAdapterInvocation
 ) -> ImageAdapterResult:
-    if invocation.input_images:
-        raise LLMUnsupportedFeatureError(
-            host.provider,
-            invocation.model,
-            "image_editing",
-            "openai_images editing transport is not implemented",
-        )
     return await OpenAIImagesAdapter.invoke(
         host,
         invocation.prompt,
@@ -223,6 +220,7 @@ async def _invoke_openai_images(
         output_format=invocation.output_format,
         response_format=invocation.response_format,
         background=invocation.background,
+        input_images=invocation.input_images,
         **invocation.option_dict(),
     )
 
@@ -230,13 +228,6 @@ async def _invoke_openai_images(
 async def _invoke_azure_images(
     host: Any, invocation: ImageAdapterInvocation
 ) -> ImageAdapterResult:
-    if invocation.input_images:
-        raise LLMUnsupportedFeatureError(
-            host.provider,
-            invocation.model,
-            "image_editing",
-            "azure_images editing transport is not implemented",
-        )
     return await AzureImagesAdapter.invoke(
         host,
         invocation.prompt,
@@ -248,6 +239,7 @@ async def _invoke_azure_images(
         output_format=invocation.output_format,
         response_format=invocation.response_format,
         background=invocation.background,
+        input_images=invocation.input_images,
         azure_api_version=invocation.azure_api_version,
         **invocation.option_dict(),
     )
@@ -282,7 +274,10 @@ async def _invoke_gemini_images(
         host,
         invocation.prompt,
         model=invocation.model,
-        input_images=list(invocation.input_images) or None,
+        input_images=[
+            f"data:{image.mime_type};base64,{base64.b64encode(image.data).decode('ascii')}"
+            for image in invocation.input_images
+        ] or None,
         **invocation.option_dict(),
     )
 

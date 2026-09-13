@@ -1,14 +1,15 @@
 """No admitted facade may silently turn multimodal input into text-only work."""
 
 import pytest
+
 from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
 from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
 from aethergraph.services.llm.request_preparation import prepare_chat_messages
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
 from aethergraph.services.llm.utils import (
+    _normalize_openai_responses_input,
     _to_anthropic_blocks,
     _to_gemini_parts,
-    _normalize_openai_responses_input,
 )
 
 
@@ -55,7 +56,7 @@ def test_legacy_preparation_rejects_unknown_shapes_without_provider_io(policy, b
 @pytest.mark.parametrize(
     "provider,endpoint", [("openai", "openai_images"), ("azure", "azure_images")]
 )
-async def test_unimplemented_edits_cannot_call_transport_even_with_profile_override(
+async def test_malformed_edits_cannot_call_transport_even_with_profile_override(
     monkeypatch, provider, endpoint
 ):
     async def forbidden(*args, **kwargs):
@@ -74,7 +75,8 @@ async def test_unimplemented_edits_cannot_call_transport_even_with_profile_overr
             image_editing="supported"
         ),
     )
-    with pytest.raises(LLMUnsupportedFeatureError, match="image_editing"):
+    from aethergraph.services.llm.media import MediaPreparationError
+    with pytest.raises(MediaPreparationError):
         await client.generate_image(
             "Edit", input_images=["data:image/png;base64,aW1hZ2U="]
         )
@@ -97,3 +99,55 @@ async def test_unknown_per_call_model_does_not_inherit_catalog_support(monkeypat
     )
     with pytest.raises(LLMUnsupportedFeatureError, match="unknown"):
         await client.generate_image("Generate", model="uncataloged-test-model")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,endpoint", [("openai", "openai_images"), ("azure", "azure_images")])
+async def test_edit_reference_bytes_reach_selected_multipart_endpoint(provider, endpoint):
+    import asyncio
+    import io
+
+    import httpx
+    from PIL import Image
+
+    from aethergraph.services.llm.types import ImageInput
+
+    output = io.BytesIO()
+    Image.new("RGB", (2, 2), "red").save(output, format="PNG")
+    payload = output.getvalue()
+    requests = []
+
+    def receive(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"b64_json": "eA=="}]})
+
+    client = GenericImageGenerationClient(
+        provider=provider, endpoint_id=endpoint, model="gpt-image-2", api_key="test",
+        base_url="https://example.test", azure_deployment="images",
+        capability_overrides=ImageGenerationCapabilityOverrides(image_editing="supported"),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(receive)) as transport:
+        client._client = transport
+        client._bound_loop = asyncio.get_running_loop()
+        result = await client.generate_image("Edit", input_images=[ImageInput(data=payload, mime_type="image/png")])
+    assert len(result.images) == 1
+    assert len(requests) == 1
+    request = requests[0]
+    assert "/images/edits" in str(request.url)
+    assert "generations" not in str(request.url)
+    assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert payload in request.content
+    assert b'name="image[]"' in request.content
+    assert b"Edit" in request.content
+    if provider == "azure":
+        assert request.url.params["api-version"] == "2025-04-01-preview"
+
+@pytest.mark.asyncio
+async def test_image_edit_profile_and_unprojected_options_fail_before_http(monkeypatch):
+    from aethergraph.services.llm.media import MediaPreparationError
+    from aethergraph.services.llm.profiles import MultimodalInputPolicy
+    client = GenericImageGenerationClient(
+        provider="openai", endpoint_id="openai_images", model="gpt-image-2", api_key="test",
+        input_policy=MultimodalInputPolicy(image_input_enabled=False),
+    )
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        await client.generate_image("Edit", input_images=["data:image/png;base64,eA=="])

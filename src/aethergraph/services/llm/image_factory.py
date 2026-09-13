@@ -89,6 +89,7 @@ def image_client_from_profile(
         profile_name=profile_name,
         capability_overrides=profile.capability_overrides,
         catalog_key=profile.model.catalog_key,
+        input_policy=profile.input_policy,
     )
 
 
