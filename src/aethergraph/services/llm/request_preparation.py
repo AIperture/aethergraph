@@ -142,12 +142,10 @@ def prepare_chat_messages(
             otherwise a detached list with normalized image payloads.
 
     Notes:
-        Unknown or malformed content block shapes remain untouched for the
-        pinned provider adapter to diagnose as before.
+        Unknown or malformed blocks fail before transport, including unmanaged
+        legacy clients. A missing image policy does not bypass shape validation.
     """
 
-    if image_policy is None:
-        return messages
     occurrences: list[tuple[int, int, str]] = []
     images: list[ImageInput] = []
     for message_index, message in enumerate(messages):
@@ -157,11 +155,16 @@ def prepare_chat_messages(
         for part_index, part in enumerate(content):
             parsed = _image_input_from_block(part)
             if parsed is None:
+                kind = part.get("type") if isinstance(part, dict) else None
+                if kind not in {"text", "input_text", "output_text", "refusal"}:
+                    raise ValueError(
+                        f"Unsupported or malformed messages[{message_index}].content[{part_index}] type: {kind!r}"
+                    )
                 continue
             image, shape = parsed
             occurrences.append((message_index, part_index, shape))
             images.append(image)
-    if not images:
+    if not images or image_policy is None:
         return messages
 
     prepared_images = prepare_image_inputs(tuple(images), policy=image_policy)

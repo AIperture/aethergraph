@@ -12,6 +12,7 @@ from aethergraph.contracts.services.llm import ImageGenerationClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.llm.adapters import ImageAdapterInvocation
+from aethergraph.services.llm.capabilities import resolve_image_generation_profile
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.http_lifecycle import (
     _close_http_clients,
@@ -20,17 +21,27 @@ from aethergraph.services.llm.http_lifecycle import (
 from aethergraph.services.llm.image_runtime import _execute_image_generation
 from aethergraph.services.llm.operation_quota import image_generation_quota_ledger
 from aethergraph.services.llm.operation_runtime import model_operation_dimensions
+from aethergraph.services.llm.profiles import (
+    ImageGenerationCapabilityOverrides,
+    ImageGenerationProfile,
+    ModelSelection,
+    ProviderConnection,
+)
 from aethergraph.services.llm.provider_transport import (
     ProviderRateGate,
     ProviderRetryExecutor,
     ProviderRetrySettings,
 )
-from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
+from aethergraph.services.llm.registry import (
+    provider_default_base_url,
+    resolve_endpoint_adapter,
+)
 from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
     ImageGenerationUsage,
     ImageResponseFormat,
+    LLMUnsupportedFeatureError,
 )
 from aethergraph.services.llm.usage_metering import _record_image_generation_metering
 
@@ -60,6 +71,8 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         default_response_format: ImageResponseFormat | None = None,
         default_background: str | None = None,
         profile_name: str | None = None,
+        capability_overrides: ImageGenerationCapabilityOverrides | None = None,
+        catalog_key: str | None = None,
     ) -> None:
         """Create an independently configured image-generation client.
 
@@ -111,6 +124,8 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             default_response_format: Optional default response transport format.
             default_background: Optional default provider background mode.
             profile_name: Optional configured profile identity.
+            capability_overrides: Explicit capability facts/policy from the selected profile.
+            catalog_key: Optional exact catalog identity for the default model.
 
         Returns:
             None: Initializes a lazy, exact-bound client.
@@ -147,6 +162,10 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         self.default_response_format = default_response_format
         self.default_background = default_background
         self.profile_name = profile_name
+        self.capability_overrides = (
+            capability_overrides or ImageGenerationCapabilityOverrides()
+        )
+        self.catalog_key = catalog_key
         self._provider_retry = ProviderRetryExecutor(
             retry_settings,
             rate_gate=rate_gate,
@@ -263,15 +282,48 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             size=self.default_size if size is None else size,
             quality=self.default_quality if quality is None else quality,
             style=style,
-            output_format=self.default_output_format if output_format is None else output_format,
+            output_format=(
+                self.default_output_format if output_format is None else output_format
+            ),
             response_format=(
-                self.default_response_format if response_format is None else response_format
+                self.default_response_format
+                if response_format is None
+                else response_format
             ),
             background=self.default_background if background is None else background,
             input_images=tuple(input_images or ()),
             azure_api_version=azure_api_version,
             options=kw,
         )
+        required = ["image_editing" if invocation.input_images else "text_to_image"]
+        if invocation.n > 1:
+            required.append("multiple_outputs")
+        binding = resolve_image_generation_profile(
+            ImageGenerationProfile(
+                connection=ProviderConnection(
+                    provider_id=self.provider,
+                    endpoint_id=self.endpoint_id,
+                    base_url=self.base_url,
+                    deployment=self.azure_deployment,
+                ),
+                model=ModelSelection(
+                    model_id=invocation.model,
+                    catalog_key=(
+                        self.catalog_key if invocation.model == self.model else None
+                    ),
+                ),
+                capability_overrides=self.capability_overrides,
+            ),
+            required=tuple(required),
+        )
+        if binding.diagnostics:
+            diagnostic = binding.diagnostics[0]
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                invocation.model,
+                diagnostic.capability,
+                diagnostic.message,
+            )
         return await _execute_image_generation(
             self,
             adapter_id=self.endpoint_id,

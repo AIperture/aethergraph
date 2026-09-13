@@ -13,6 +13,7 @@ from ..registry import ModelOperation
 CatalogEvidenceStatus = Literal["verified", "conservative", "unknown"]
 CatalogCapabilityState = Literal["supported", "unsupported", "unknown"]
 CatalogCapability = Literal[
+    "input_media",
     "chat_tools",
     "native_tool_search",
     "structured_output",
@@ -125,6 +126,15 @@ class CatalogEmbeddingCapabilities(CatalogContract):
     dimensions: CatalogCapabilityState
 
 
+class CatalogInputMediaCapabilities(CatalogContract):
+    """Model input facts, independent of whether an AG adapter transports them."""
+
+    image_input: CatalogCapabilityState
+    audio_input: CatalogCapabilityState = "unknown"
+    video_input: CatalogCapabilityState = "unknown"
+    document_input: CatalogCapabilityState = "unknown"
+
+
 class CatalogImageGenerationCapabilities(CatalogContract):
     """Evidence-backed image-generation capabilities for one model binding."""
 
@@ -142,6 +152,7 @@ class ModelCatalogEntry(CatalogContract):
     endpoint_ids: tuple[str, ...]
     model_id: str | None = Field(default=None, min_length=1, max_length=512)
     model_pattern: str | None = Field(default=None, min_length=1, max_length=1024)
+    input_media: CatalogInputMediaCapabilities | None = None
     chat_tools: CatalogChatToolCapabilities | None = None
     native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
     structured_output: CatalogStructuredOutput | None = None
@@ -242,6 +253,7 @@ class ModelCatalogEntry(CatalogContract):
             (
                 bool(self.native_tool_search),
                 self.chat_tools is not None,
+                self.input_media is not None,
                 self.structured_output is not None,
                 self.prompt_cache is not None,
                 self.server_context_compaction is not None,
@@ -261,6 +273,8 @@ class ModelCatalogEntry(CatalogContract):
         if self.operation != declared_operation:
             raise ValueError("catalog capability domain does not match operation")
         positive_capability = bool(self.native_tool_search)
+        if self.input_media is not None:
+            positive_capability = positive_capability or "supported" in self.input_media.model_dump().values()
         if self.chat_tools is not None:
             positive_capability = positive_capability or "supported" in {
                 self.chat_tools.native_tool_calling,
@@ -415,6 +429,7 @@ class ModelCatalog(CatalogContract):
 __all__ = [
     "CatalogContract",
     "CatalogCapability",
+    "CatalogInputMediaCapabilities",
     "CatalogCapabilityState",
     "CatalogChatToolCapabilities",
     "CatalogEmbeddingCapabilities",

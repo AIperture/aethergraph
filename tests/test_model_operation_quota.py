@@ -13,6 +13,7 @@ from aethergraph.config.config import (
 )
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
+from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
 from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
 from aethergraph.services.llm.types import (
     ModelOperationRunQuotaExceededError,
@@ -197,6 +198,7 @@ async def test_image_count_quota_rejects_before_transport_creation() -> None:
     client = GenericImageGenerationClient(
         provider="openai",
         model="gpt-image-test",
+        capability_overrides=ImageGenerationCapabilityOverrides(text_to_image="supported", multiple_outputs="supported"),
         endpoint_id="openai_images",
         api_key="test",
         operation_quota_cfg=ImageGenerationUsageQuotaSettings(max_images_per_run=1),
@@ -236,6 +238,7 @@ async def test_image_actual_tokens_are_metered_before_typed_quota_error() -> Non
     client = GenericImageGenerationClient(
         provider="openai",
         model="gpt-image-test",
+        capability_overrides=ImageGenerationCapabilityOverrides(text_to_image="supported", multiple_outputs="supported"),
         endpoint_id="openai_images",
         api_key="test",
         metering=meter,  # type: ignore[arg-type]

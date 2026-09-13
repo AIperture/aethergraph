@@ -805,3 +805,15 @@ def test_server_compaction_capability_is_catalog_and_endpoint_scoped() -> None:
     unsupported = resolve_model_request(unsupported_profile, request)
     assert unsupported.valid is False
     assert unsupported.compatibility.diagnostics[0].code == ("adapter_capability_unimplemented")
+
+
+@pytest.mark.parametrize("provider,model", [("openai", "gpt-5.2"), ("anthropic", "claude-sonnet-4-6"), ("google", "gemini-2.5-flash")])
+def test_image_input_facts_are_resolved_from_exact_catalog_record(provider, model):
+    profile = chat_profile_from_legacy(LLMProfile(provider=provider, model=model))
+    binding = resolve_chat_profile(profile, required=("image_input",))
+    assert binding.valid
+    assert binding.capabilities.image_input.state == "supported"
+    assert binding.capabilities.image_input.provenance[0].source == "catalog"
+    assert f"{provider}/{model}-input-media/v8" in binding.catalog_keys
+    unknown = profile.model_copy(update={"model": profile.model.model_copy(update={"model_id": model + "-unverified"})})
+    assert not resolve_chat_profile(unknown, required=("image_input",)).valid

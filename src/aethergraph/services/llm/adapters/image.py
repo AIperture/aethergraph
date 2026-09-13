@@ -167,7 +167,9 @@ class ImageAdapterInvocation:
         object.__setattr__(self, "prompt", prompt)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "n", int(self.n))
-        object.__setattr__(self, "input_images", tuple(str(item) for item in self.input_images))
+        object.__setattr__(
+            self, "input_images", tuple(str(item) for item in self.input_images)
+        )
         object.__setattr__(self, "options", copy.deepcopy(self.options))
 
     def option_dict(self) -> dict[str, Any]:
@@ -203,6 +205,13 @@ class ImageAdapterInvocation:
 async def _invoke_openai_images(
     host: Any, invocation: ImageAdapterInvocation
 ) -> ImageAdapterResult:
+    if invocation.input_images:
+        raise LLMUnsupportedFeatureError(
+            host.provider,
+            invocation.model,
+            "image_editing",
+            "openai_images editing transport is not implemented",
+        )
     return await OpenAIImagesAdapter.invoke(
         host,
         invocation.prompt,
@@ -218,7 +227,16 @@ async def _invoke_openai_images(
     )
 
 
-async def _invoke_azure_images(host: Any, invocation: ImageAdapterInvocation) -> ImageAdapterResult:
+async def _invoke_azure_images(
+    host: Any, invocation: ImageAdapterInvocation
+) -> ImageAdapterResult:
+    if invocation.input_images:
+        raise LLMUnsupportedFeatureError(
+            host.provider,
+            invocation.model,
+            "image_editing",
+            "azure_images editing transport is not implemented",
+        )
     return await AzureImagesAdapter.invoke(
         host,
         invocation.prompt,
@@ -238,6 +256,28 @@ async def _invoke_azure_images(host: Any, invocation: ImageAdapterInvocation) ->
 async def _invoke_gemini_images(
     host: Any, invocation: ImageAdapterInvocation
 ) -> ImageAdapterResult:
+    unsupported = [
+        name
+        for name in (
+            "size",
+            "quality",
+            "style",
+            "output_format",
+            "response_format",
+            "background",
+            "azure_api_version",
+        )
+        if getattr(invocation, name) is not None
+    ]
+    if invocation.n != 1:
+        unsupported.append("n")
+    if unsupported:
+        raise LLMUnsupportedFeatureError(
+            host.provider,
+            invocation.model,
+            ", ".join(unsupported),
+            "Options are not projected by gemini_image_generation",
+        )
     return await GeminiImagesAdapter.invoke(
         host,
         invocation.prompt,
