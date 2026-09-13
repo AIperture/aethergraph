@@ -672,6 +672,37 @@ def test_gpt_image_2_resolves_required_generation_capabilities(model: str) -> No
     assert binding.capabilities.image_editing.provenance[0].source == "catalog"
 
 
+@pytest.mark.parametrize("flavor", ("sunburst", "flare"))
+@pytest.mark.parametrize("snapshot", ("", "-2026-09-08"))
+def test_gpt_image_25_resolves_required_editing_capabilities(flavor: str, snapshot: str) -> None:
+    profile = ImageGenerationProfile(
+        connection=ProviderConnection(provider_id="openai", endpoint_id="openai_images"),
+        model=ModelSelection(model_id=f"gpt-image-2.5-{flavor}{snapshot}"),
+    )
+    binding = resolve_image_generation_profile(
+        profile, required=("text_to_image", "image_editing", "multiple_outputs")
+    )
+    assert binding.valid
+    assert binding.catalog_key == f"openai/gpt-image-2.5-{flavor}/v9"
+    assert binding.capabilities.image_editing.state == "supported"
+    assert binding.capabilities.image_editing.provenance[0].source == "catalog"
+
+
+@pytest.mark.parametrize("model", (
+    "gpt-image-2.5", "gpt-image-2.5-unknown", "gpt-image-2.5-flare-2099-01-01",
+    "gpt-image-2.5-sunburst-2099-01-01", "future-image-model",
+))
+def test_uncataloged_image_models_still_reject_required_editing(model: str) -> None:
+    profile = ImageGenerationProfile(
+        connection=ProviderConnection(provider_id="openai", endpoint_id="openai_images"),
+        model=ModelSelection(model_id=model),
+    )
+    binding = resolve_image_generation_profile(profile, required=("image_editing",))
+    assert not binding.valid
+    assert binding.catalog_key is None
+    assert binding.capabilities.image_editing.state == "unknown"
+
+
 def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation() -> None:
     profile = ImageGenerationProfile(
         connection=ProviderConnection(

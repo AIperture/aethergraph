@@ -83,7 +83,8 @@ async def test_malformed_edits_cannot_call_transport_even_with_profile_override(
 
 
 @pytest.mark.asyncio
-async def test_unknown_per_call_model_does_not_inherit_catalog_support(monkeypatch):
+@pytest.mark.parametrize("model", ("uncataloged-test-model", "gpt-image-2.5-unknown", "gpt-image-2.5-flare-2099-01-01"))
+async def test_unknown_per_call_model_does_not_inherit_catalog_support(monkeypatch, model):
     async def forbidden(*args, **kwargs):
         pytest.fail("unknown model reached transport")
 
@@ -98,11 +99,17 @@ async def test_unknown_per_call_model_does_not_inherit_catalog_support(monkeypat
         api_key="test",
     )
     with pytest.raises(LLMUnsupportedFeatureError, match="unknown"):
-        await client.generate_image("Generate", model="uncataloged-test-model")
+        await client.generate_image("Generate", model=model)
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,endpoint", [("openai", "openai_images"), ("azure", "azure_images")])
-async def test_edit_reference_bytes_reach_selected_multipart_endpoint(provider, endpoint):
+@pytest.mark.parametrize("provider,endpoint,model", [
+    ("azure", "azure_images", "gpt-image-2"),
+    *(("openai", "openai_images", model) for model in (
+        "gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare",
+        "gpt-image-2.5-sunburst-2026-09-08", "gpt-image-2.5-flare-2026-09-08",
+    )),
+])
+async def test_edit_reference_bytes_reach_selected_multipart_endpoint(provider, endpoint, model):
     import asyncio
     import io
 
@@ -121,9 +128,13 @@ async def test_edit_reference_bytes_reach_selected_multipart_endpoint(provider, 
         return httpx.Response(200, json={"data": [{"b64_json": "eA=="}]})
 
     client = GenericImageGenerationClient(
-        provider=provider, endpoint_id=endpoint, model="gpt-image-2", api_key="test",
+        provider=provider, endpoint_id=endpoint, model=model, api_key="test",
         base_url="https://example.test", azure_deployment="images",
-        capability_overrides=ImageGenerationCapabilityOverrides(image_editing="supported"),
+        # Azure deployment facts are explicit; OpenAI must resolve from the catalog alone.
+        capability_overrides=(
+            ImageGenerationCapabilityOverrides(image_editing="supported")
+            if provider == "azure" else ImageGenerationCapabilityOverrides()
+        ),
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(receive)) as transport:
         client._client = transport
@@ -138,6 +149,8 @@ async def test_edit_reference_bytes_reach_selected_multipart_endpoint(provider, 
     assert payload in request.content
     assert b'name="image[]"' in request.content
     assert b"Edit" in request.content
+    if provider == "openai":
+        assert model.encode() in request.content
     if provider == "azure":
         assert request.url.params["api-version"] == "2025-04-01-preview"
 
