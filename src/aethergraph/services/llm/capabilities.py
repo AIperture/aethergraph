@@ -348,6 +348,13 @@ def resolve_chat_profile(
         "chat",
         profile.connection.endpoint_id,
     )
+    input_media_entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        "chat",
+        profile.connection.endpoint_id,
+        capability="input_media",
+    )
     chat_tools_entry = resolve_model_catalog_capability_entry(
         profile.connection.provider_id,
         profile.model.model_id,
@@ -387,6 +394,8 @@ def resolve_chat_profile(
         catalog_states["native_tool_search_client"] = (
             "supported" if "native_client" in native_modes else "unsupported"
         )
+    if input_media_entry is not None and input_media_entry.input_media is not None:
+        catalog_states["image_input"] = input_media_entry.input_media.image_input
     if chat_tools_entry is not None and chat_tools_entry.chat_tools is not None:
         chat_tools = chat_tools_entry.chat_tools
         catalog_states["native_tool_calling"] = chat_tools.native_tool_calling
@@ -409,6 +418,7 @@ def resolve_chat_profile(
             context_compaction_entry.server_context_compaction.state
         )
     capability_entries = {
+        "image_input": input_media_entry,
         "native_tool_calling": chat_tools_entry,
         "tool_result_continuation": chat_tools_entry,
         "parallel_tool_calls": chat_tools_entry,
@@ -473,6 +483,7 @@ def resolve_chat_profile(
             item.catalog_key
             for item in (
                 native_entry,
+                input_media_entry,
                 chat_tools_entry,
                 structured_entry,
                 prompt_cache_entry,

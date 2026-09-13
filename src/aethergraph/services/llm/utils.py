@@ -32,7 +32,9 @@ def _ensure_b64(img: ImageInput) -> tuple[str, str]:
         import base64
 
         return base64.b64encode(img.data).decode("ascii"), img.mime_type
-    raise ValueError("ImageInput must have (b64+mime_type) or (data+mime_type) or a data: URL")
+    raise ValueError(
+        "ImageInput must have (b64+mime_type) or (data+mime_type) or a data: URL"
+    )
 
 
 def _normalize_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -88,7 +90,9 @@ def _normalize_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, An
                             }
                         )
                     elif src.get("type") == "url":
-                        parts.append({"type": "image", "image": ImageInput(url=src.get("url"))})
+                        parts.append(
+                            {"type": "image", "image": ImageInput(url=src.get("url"))}
+                        )
                     continue
 
         out.append({"role": role, "parts": parts})
@@ -147,12 +151,16 @@ def _validate_json_schema(obj: Any, schema: dict[str, Any]) -> None:
     jsonschema.validate(instance=obj, schema=schema)
 
 
-def _validate_json_schema_fallback(obj: Any, schema: dict[str, Any], *, path: str) -> None:
+def _validate_json_schema_fallback(
+    obj: Any, schema: dict[str, Any], *, path: str
+) -> None:
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
         if any(_matches_schema_type(obj, candidate) for candidate in schema_type):
             matching_candidates = [
-                candidate for candidate in schema_type if _matches_schema_type(obj, candidate)
+                candidate
+                for candidate in schema_type
+                if _matches_schema_type(obj, candidate)
             ]
             # Prefer validating against the first non-null candidate that matches.
             chosen = next(
@@ -183,7 +191,9 @@ def _validate_type_specific(
 ) -> None:
     if schema_type == "object":
         if not isinstance(obj, dict):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected object")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected object"
+            )
         required = schema.get("required", []) or []
         for key in required:
             if key not in obj:
@@ -200,29 +210,43 @@ def _validate_type_specific(
                 )
         for key, value in obj.items():
             if key in properties:
-                _validate_json_schema_fallback(value, properties[key], path=f"{path}.{key}")
+                _validate_json_schema_fallback(
+                    value, properties[key], path=f"{path}.{key}"
+                )
     elif schema_type == "array":
         if not isinstance(obj, list):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected array")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected array"
+            )
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for idx, item in enumerate(obj):
                 _validate_json_schema_fallback(item, item_schema, path=f"{path}[{idx}]")
     elif schema_type == "string":
         if not isinstance(obj, str):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected string")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected string"
+            )
     elif schema_type == "number":
         if not isinstance(obj, (int, float)) or isinstance(obj, bool):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected number")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected number"
+            )
     elif schema_type == "integer":
         if not isinstance(obj, int) or isinstance(obj, bool):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected integer")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected integer"
+            )
     elif schema_type == "boolean":
         if not isinstance(obj, bool):
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected boolean")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected boolean"
+            )
     elif schema_type == "null":
         if obj is not None:
-            raise RuntimeError(f"JSON schema validation failed at {path}: expected null")
+            raise RuntimeError(
+                f"JSON schema validation failed at {path}: expected null"
+            )
 
 
 def _validate_enum(obj: Any, schema: dict[str, Any], *, path: str) -> None:
@@ -267,7 +291,11 @@ def _message_content_has_images(messages: list[dict[str, Any]]) -> bool:
         c = m.get("content")
         if isinstance(c, list):
             for p in c:
-                if isinstance(p, dict) and p.get("type") in ("image_url", "input_image", "image"):
+                if isinstance(p, dict) and p.get("type") in (
+                    "image_url",
+                    "input_image",
+                    "image",
+                ):
                     return True
     return False
 
@@ -284,9 +312,11 @@ def _to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
 
     if isinstance(content, list):
         blocks: list[dict[str, Any]] = []
-        for p in content:
+        for part_index, p in enumerate(content):
             if not isinstance(p, dict):
-                continue
+                raise ValueError(
+                    f"content[{part_index}] must be a typed content object"
+                )
             t = p.get("type")
             if t in ("text", "input_text", "output_text"):
                 block = {"type": "text", "text": p.get("text", "")}
@@ -307,13 +337,25 @@ def _to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
                     blocks.append(
                         {
                             "type": "image",
-                            "source": {"type": "base64", "media_type": mime, "data": b64},
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": b64,
+                            },
                         }
                     )
                 elif isinstance(url, str):
                     raise RuntimeError(
                         "Anthropic vision: provide data: URLs (base64) for images (no remote fetch in client)."
                     )
+                else:
+                    raise ValueError(
+                        f"content[{part_index}] image requires a source URL"
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported Anthropic content[{part_index}] type: {t!r}"
+                )
         return blocks
 
     return [{"type": "text", "text": str(content)}]
@@ -330,9 +372,11 @@ def _to_gemini_parts(content: Any) -> list[dict[str, Any]]:
 
     if isinstance(content, list):
         parts: list[dict[str, Any]] = []
-        for p in content:
+        for part_index, p in enumerate(content):
             if not isinstance(p, dict):
-                continue
+                raise ValueError(
+                    f"content[{part_index}] must be a typed content object"
+                )
             t = p.get("type")
             if t in ("text", "input_text", "output_text"):
                 parts.append({"text": p.get("text", "")})
@@ -347,14 +391,24 @@ def _to_gemini_parts(content: Any) -> list[dict[str, Any]]:
                     parts.append({"inline_data": {"mime_type": mime, "data": b64}})
                 elif isinstance(url, str):
                     raise RuntimeError(
-                        "Gemini vision: provide data: URLs (base64) or file_uri; remote http(s) URLs not accepted inline."
+                        "Gemini vision: provide data: URLs (base64); file references and remote http(s) URLs are not supported by this input contract."
                     )
+                else:
+                    raise ValueError(
+                        f"content[{part_index}] image requires a source URL"
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported Gemini content[{part_index}] type: {t!r}"
+                )
         return parts
 
     return [{"text": str(content)}]
 
 
-def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_openai_responses_input(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """
     Make OpenAI Responses input robust:
       - If content is str: keep as-is
@@ -371,16 +425,22 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
             out.append(
                 {
                     "role": role,
-                    "content": ([{"type": "output_text", "text": c}] if role == "assistant" else c),
+                    "content": (
+                        [{"type": "output_text", "text": c}]
+                        if role == "assistant"
+                        else c
+                    ),
                 }
             )
             continue
 
         if isinstance(c, list):
             blocks: list[dict[str, Any]] = []
-            for p in c:
+            for part_index, p in enumerate(c):
                 if not isinstance(p, dict):
-                    continue
+                    raise ValueError(
+                        f"content[{part_index}] must be a typed content object"
+                    )
                 t = p.get("type")
                 if role == "assistant" and t in (
                     "text",
@@ -395,7 +455,8 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
                     blocks.append(dict(p))
                 elif role == "assistant" and t in ("input_image", "image_url"):
                     raise ValueError(
-                        "OpenAI Responses assistant history cannot contain " "input images"
+                        "OpenAI Responses assistant history cannot contain "
+                        "input images"
                     )
                 elif role != "assistant" and t in ("input_text", "input_image"):
                     blocks.append(dict(p))
@@ -408,9 +469,14 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
                     url = (p.get("image_url") or {}).get("url") or p.get("url")
                     if isinstance(url, str):
                         blocks.append({"type": "input_image", "image_url": url})
+                    else:
+                        raise ValueError(
+                            f"content[{part_index}] image requires a source URL"
+                        )
                 else:
-                    # ignore unknown part types
-                    pass
+                    raise ValueError(
+                        f"Unsupported Responses content[{part_index}] type: {t!r}"
+                    )
             out.append({"role": role, "content": blocks})
             continue
 
@@ -422,7 +488,9 @@ def _normalize_base_url_no_trailing_slash(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
 
-def _azure_images_generations_url(endpoint: str, deployment: str, api_version: str) -> str:
+def _azure_images_generations_url(
+    endpoint: str, deployment: str, api_version: str
+) -> str:
     # endpoint example: https://<resource>.openai.azure.com
     ep = _normalize_base_url_no_trailing_slash(endpoint)
     return f"{ep}/openai/deployments/{deployment}/images/generations?api-version={api_version}"

@@ -1,6 +1,6 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 7,
+  "catalog_revision": 9,
   "entries": [
     {
       "catalog_key": "openai/gpt-5.2-server-context-compaction/v7",
@@ -685,6 +685,50 @@
       "priority": 100
     },
     {
+      "catalog_key": "openai/gpt-image-2.5-sunburst/v9",
+      "provider_id": "openai",
+      "operation": "image_generation",
+      "endpoint_ids": [
+        "openai_images"
+      ],
+      "model_pattern": "gpt-image-2\\.5-sunburst(?:-2026-09-08)?",
+      "image_generation": {
+        "text_to_image": "supported",
+        "image_editing": "supported",
+        "multiple_outputs": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+        "https://developers.openai.com/api/docs/guides/image-generation"
+      ],
+      "verified_at": "2026-09-13",
+      "catalog_revision": 9,
+      "evidence_status": "verified",
+      "priority": 110
+    },
+    {
+      "catalog_key": "openai/gpt-image-2.5-flare/v9",
+      "provider_id": "openai",
+      "operation": "image_generation",
+      "endpoint_ids": [
+        "openai_images"
+      ],
+      "model_pattern": "gpt-image-2\\.5-flare(?:-2026-09-08)?",
+      "image_generation": {
+        "text_to_image": "supported",
+        "image_editing": "supported",
+        "multiple_outputs": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+        "https://developers.openai.com/api/docs/guides/image-generation"
+      ],
+      "verified_at": "2026-09-13",
+      "catalog_revision": 9,
+      "evidence_status": "verified",
+      "priority": 110
+    },
+    {
       "catalog_key": "openai/gpt-image-2/v5",
       "provider_id": "openai",
       "operation": "image_generation",
@@ -737,6 +781,73 @@
       "catalog_revision": 3,
       "evidence_status": "verified",
       "priority": 100
+    },
+    {
+      "catalog_key": "openai/gpt-5.2-input-media/v8",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses",
+        "openai_chat_completions"
+      ],
+      "model_id": "gpt-5.2",
+      "input_media": {
+        "image_input": "supported",
+        "audio_input": "unsupported",
+        "video_input": "unsupported",
+        "document_input": "unknown"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.2"
+      ],
+      "verified_at": "2026-09-13",
+      "catalog_revision": 8,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/claude-sonnet-4-6-input-media/v8",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_id": "claude-sonnet-4-6",
+      "input_media": {
+        "image_input": "supported",
+        "audio_input": "unknown",
+        "video_input": "unknown",
+        "document_input": "unknown"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+      ],
+      "verified_at": "2026-09-13",
+      "catalog_revision": 8,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "google/gemini-2.5-flash-input-media/v8",
+      "provider_id": "google",
+      "operation": "chat",
+      "endpoint_ids": [
+        "gemini_generate_content"
+      ],
+      "model_id": "gemini-2.5-flash",
+      "input_media": {
+        "image_input": "supported",
+        "audio_input": "supported",
+        "video_input": "supported",
+        "document_input": "unknown"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash"
+      ],
+      "verified_at": "2026-09-13",
+      "catalog_revision": 8,
+      "evidence_status": "verified",
+      "priority": 200
     }
   ]
 }

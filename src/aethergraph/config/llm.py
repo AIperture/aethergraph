@@ -6,6 +6,7 @@ from aethergraph.services.llm.profiles import (
     ChatCapabilityOverrides,
     EmbeddingCapabilityOverrides,
     ImageGenerationCapabilityOverrides,
+    MultimodalInputPolicy,
 )
 from aethergraph.services.llm.provider_transport import ProviderRetrySettings
 from aethergraph.services.llm.providers import Provider
@@ -169,6 +170,7 @@ class EmbeddingSettings(BaseModel):
 
 
 class ImageGenerationProfileSettings(BaseModel):
+    input_policy: MultimodalInputPolicy = Field(default_factory=lambda: MultimodalInputPolicy(image_input_enabled=True))
     provider: Provider = "openai"
     model: str = "gpt-image-2"
     endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)

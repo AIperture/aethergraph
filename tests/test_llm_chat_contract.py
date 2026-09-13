@@ -2121,6 +2121,8 @@ async def test_openai_image_generation_survives_responses_chat_extraction() -> N
         }
     )
     image_client = client._image_client_for_compatibility()
+    from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
@@ -2153,6 +2155,8 @@ async def test_azure_image_generation_survives_chat_adapter_extraction() -> None
         }
     )
     image_client = client._image_client_for_compatibility()
+    from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
@@ -2199,6 +2203,8 @@ async def test_gemini_image_generation_survives_chat_adapter_extraction() -> Non
         }
     )
     image_client = client._image_client_for_compatibility()
+    from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 

@@ -11,6 +11,7 @@ from aethergraph.services.llm.generic_image_client import GenericImageGeneration
 from aethergraph.services.llm.image_factory import build_image_generation_clients
 from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.service import LLMService
+from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
 from aethergraph.services.llm.types import ImageGenerationResult, LLMUnsupportedFeatureError
 
 
@@ -52,6 +53,7 @@ async def test_independent_image_client_applies_profile_defaults_and_exact_endpo
     client = GenericImageGenerationClient(
         provider="openai",
         model="gpt-image-test",
+        capability_overrides=ImageGenerationCapabilityOverrides(text_to_image="supported", multiple_outputs="supported"),
         endpoint_id="openai_images",
         api_key="test",
         default_count=2,

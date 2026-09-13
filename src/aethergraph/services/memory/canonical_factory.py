@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 import logging
 import math
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from aethergraph.services.canonical_storage_scope import (
     merge_storage_scope,
     validate_storage_owner_scope,
 )
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.storage.contracts import StorageBundle, StorageScope
 
 from .canonical_facade import CanonicalMemoryFacade
@@ -21,6 +23,36 @@ from .canonical_public import CanonicalPublicMemoryFacade
 
 if TYPE_CHECKING:
     from aethergraph.contracts.services.llm import LLMClientProtocol
+
+
+def canonical_memory_scope(scope: Any) -> StorageScope:
+    common = {
+        "org_id": getattr(scope, "org_id", None),
+        "user_id": getattr(scope, "user_id", None),
+    }
+    custom_scope = getattr(scope, "_memory_scope_id", None)
+    if custom_scope:
+        return StorageScope(**common, scope_key=custom_scope)
+    level = getattr(scope, "memory_level", None)
+    if level == "session":
+        return StorageScope(**common, session_id=getattr(scope, "session_id", None))
+    if level == "run":
+        return StorageScope(**common, run_id=getattr(scope, "run_id", None))
+    if level == "user":
+        return StorageScope(**common)
+    if level == "org":
+        return StorageScope(org_id=getattr(scope, "org_id", None))
+    if level == "scope":
+        return StorageScope()
+    if getattr(scope, "session_id", None):
+        return StorageScope(**common, session_id=scope.session_id)
+    if getattr(scope, "user_id", None):
+        return StorageScope(**common)
+    if getattr(scope, "run_id", None):
+        return StorageScope(**common, run_id=scope.run_id)
+    if getattr(scope, "org_id", None):
+        return StorageScope(org_id=scope.org_id)
+    return StorageScope()
 
 _MAX_HOT_EVENTS = 10_000
 
@@ -170,6 +202,44 @@ class CanonicalMemoryFacadeFactory:
             hot_max_events=self._hot_max_events,
             hot_ttl_seconds=self._hot_ttl_seconds,
             monotonic_clock=self._monotonic_clock,
+        )
+
+    def for_runtime_scope(
+        self, scope: Scope, *, level: ScopeLevel,
+        projection_logger: logging.Logger | logging.LoggerAdapter | None = None,
+    ) -> CanonicalPublicMemoryFacade:
+        """Bind a selected memory level from trusted runtime identity in this bundle.
+
+        Examples:
+            `memory = factory.for_runtime_scope(scope, level="user")`.
+
+        Args:
+            scope: Existing trusted runtime scope; no caller-supplied identity override.
+            level: Logical memory level to bind explicitly.
+            projection_logger: Existing execution logger for projection failures.
+
+        Returns:
+            CanonicalPublicMemoryFacade: Existing public memory over the same stores.
+
+        Notes:
+            Missing identities and a factory owner narrower than the requested level
+            fail explicitly. This method does not change the bundle's durable lifetime.
+        """
+        if level not in {"session", "run", "user", "org", "scope"}:
+            raise ValueError(f"Unsupported memory level: {level!r}")
+        identity_field = {"session": "session_id", "run": "run_id", "user": "user_id", "org": "org_id"}.get(level)
+        if identity_field and not getattr(scope, identity_field):
+            raise ValueError(f"Memory level {level!r} requires trusted {identity_field}")
+        if level in {"org", "scope"} and self.owner_scope.user_id is not None:
+            raise ValueError("Memory owner is user-bound; broader memory access is unavailable")
+        if level == "scope" and self.owner_scope.org_id is not None:
+            raise ValueError("Memory owner is organization-bound; broader memory access is unavailable")
+        selected = replace(scope, memory_level=level, _memory_scope_id=None)
+        provenance = StorageScope(**{key: value for key, value in scope.identity_labels().items() if key in {"org_id", "user_id", "session_id", "run_id", "graph_id", "node_id", "agent_id"}})
+        return self.for_public_execution(
+            canonical_memory_scope(selected), logical_scope_id=selected.memory_scope_id(),
+            provenance_scope=provenance, deprecated_app_id=scope.app_id,
+            projection_logger=projection_logger,
         )
 
     def for_public_execution(

@@ -8,11 +8,18 @@ from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
 )
-from aethergraph.services.llm.types import GeneratedImage, ImageGenerationResult
+from aethergraph.services.llm.types import (
+    GeneratedImage,
+    ImageGenerationResult,
+    ImageInput,
+    LLMUnsupportedFeatureError,
+)
 from aethergraph.services.llm.utils import (
     _azure_images_generations_url,
     _guess_mime_from_format,
 )
+
+from .image_files import image_edit_files
 
 
 class AzureImagesAdapter:
@@ -32,6 +39,7 @@ class AzureImagesAdapter:
         response_format: Any | None,
         background: str | None,
         azure_api_version: str | None,
+        input_images: tuple[ImageInput, ...] = (),
         **kw: Any,
     ) -> ProviderCallResult[ImageGenerationResult]:
         """Generate images through the Azure OpenAI Images endpoint.
@@ -124,7 +132,21 @@ class AzureImagesAdapter:
         if background is not None:
             body["background"] = background
 
-        response = await host._client.post(url, headers=headers, json=body)
+        if kw or (input_images and (style is not None or response_format is not None)):
+            unsupported = sorted(kw)
+            if input_images:
+                unsupported.extend(name for name, value in (("style", style), ("response_format", response_format)) if value is not None)
+            raise LLMUnsupportedFeatureError(host.provider, model, ", ".join(unsupported), "Options are not implemented by the selected image adapter")
+        if input_images:
+            url = url.replace("/images/generations", "/images/edits")
+            headers.pop("Content-Type", None)
+            response = await host._client.post(
+                url, headers=headers,
+                data={key: str(value) for key, value in body.items()},
+                files=image_edit_files(input_images),
+            )
+        else:
+            response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("azure", model, "image", response)
         data = response.json()
         images = [

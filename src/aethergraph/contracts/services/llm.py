@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         EmbeddingResult,
         ImageFormat,
         ImageGenerationResult,
+        ImageInput,
         ImageResponseFormat,
         LLMRequestEstimate,
         PromptCacheRequest,
@@ -155,7 +156,7 @@ class ImageGenerationClientProtocol(Protocol):
         output_format: ImageFormat | None = None,
         response_format: ImageResponseFormat | None = None,
         background: str | None = None,
-        input_images: list[str] | None = None,
+        input_images: list[ImageInput | str] | None = None,
         azure_api_version: str | None = None,
     ) -> ImageGenerationResult:
         """Generate images through one configured image-operation client.
@@ -189,7 +190,7 @@ class ImageGenerationClientProtocol(Protocol):
             output_format: Optional encoded image format.
             response_format: Optional response transport format.
             background: Optional provider background mode.
-            input_images: Optional source-image data URLs.
+            input_images: Canonical inline images or source-image data URLs.
             azure_api_version: Optional Azure Images API version.
         Returns:
             ImageGenerationResult: Normalized images, provider usage, and raw data.

@@ -137,3 +137,29 @@ def test_memory_factory_rejects_owner_conflicts_and_performs_no_lifecycle_probe(
         assert docstring.index("Args:") < docstring.index("Returns:")
         assert docstring.index("Returns:") < docstring.index("Notes:")
         assert docstring.count("```python") >= 2
+
+
+@pytest.mark.asyncio
+async def test_public_user_memory_reuses_bundle_across_sessions_and_reopen(tmp_path):
+    from aethergraph.services.scope.scope import Scope
+
+    owner = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    bundle = _open_bundle(tmp_path)
+    factory = CanonicalMemoryFacadeFactory(bundle=bundle, owner_scope=owner)
+    try:
+        writer = factory.for_runtime_scope(Scope(org_id="org-1", user_id="user-1", session_id="session-1"), level="user")
+        await writer.append_event_commit(event_id="persistent-1", kind="fixture.preference", data={"color": "blue"})
+    finally:
+        await bundle.close()
+    reopened = _open_bundle(tmp_path)
+    factory = CanonicalMemoryFacadeFactory(bundle=reopened, owner_scope=owner)
+    try:
+        reader = factory.for_runtime_scope(Scope(org_id="org-1", user_id="user-1", session_id="session-2"), level="user")
+        events = await reader.query_events(kinds=["fixture.preference"], limit=10, use_persistence=True)
+        assert [event.event_id for event in events] == ["persistent-1"]
+        for scope in (Scope(org_id="org-1", user_id="other"), Scope(org_id="other", user_id="user-1")):
+            assert await factory.for_runtime_scope(scope, level="user").query_events(kinds=["fixture.preference"], limit=10, use_persistence=True) == []
+        with pytest.raises(ValueError, match="trusted user_id"):
+            factory.for_runtime_scope(Scope(session_id="session-1"), level="user")
+    finally:
+        await reopened.close()

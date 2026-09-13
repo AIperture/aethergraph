@@ -250,6 +250,7 @@ def image_generation_profile_from_settings(
             retry=profile.retry,
             rate_limit_group=profile.rate_limit_group,
         ),
+        input_policy=profile.input_policy,
         defaults=ImageGenerationDefaults(
             count=profile.count,
             size=profile.size,

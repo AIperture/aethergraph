@@ -199,3 +199,17 @@ async def test_embedding_service_closes_each_distinct_client_once() -> None:
     await service.aclose()
 
     assert client.close_count == 1
+
+
+def test_node_context_memory_rebinds_only_through_existing_trusted_factory():
+    class Factory:
+        def for_runtime_scope(self, scope, *, level, projection_logger):
+            return scope, level
+    context = _context(embedding=None)
+    context.scope = Scope(user_id="user", session_id="session")
+    context.services.memory = Factory()
+    context.logger = lambda: None
+    assert context.memory(level="user") == (context.scope, "user")
+    context.scope = None
+    with pytest.raises(RuntimeError, match="Trusted memory"):
+        context.memory(level="user")

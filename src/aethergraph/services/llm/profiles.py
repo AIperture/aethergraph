@@ -182,7 +182,7 @@ class ChatProfile(ProfileContract):
     credentials: CredentialSelection = Field(default_factory=CredentialSelection)
     transport: TransportPolicy = Field(default_factory=TransportPolicy)
     defaults: ChatDefaults = Field(default_factory=ChatDefaults)
-    input_policy: MultimodalInputPolicy = Field(default_factory=MultimodalInputPolicy)
+    input_policy: MultimodalInputPolicy = Field(default_factory=lambda: MultimodalInputPolicy(image_input_enabled=True))
     capability_overrides: ChatCapabilityOverrides = Field(default_factory=ChatCapabilityOverrides)
 
 
@@ -242,6 +242,7 @@ class ImageGenerationProfile(ProfileContract):
     credentials: CredentialSelection = Field(default_factory=CredentialSelection)
     transport: TransportPolicy = Field(default_factory=TransportPolicy)
     defaults: ImageGenerationDefaults = Field(default_factory=ImageGenerationDefaults)
+    input_policy: MultimodalInputPolicy = Field(default_factory=lambda: MultimodalInputPolicy(image_input_enabled=True))
     capability_overrides: ImageGenerationCapabilityOverrides = Field(
         default_factory=ImageGenerationCapabilityOverrides
     )
