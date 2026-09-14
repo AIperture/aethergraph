@@ -104,6 +104,135 @@ def _open_bundle(root: Path, clock: _Clock):
 
 
 @pytest.mark.asyncio
+async def test_explicit_event_retry_preserves_time_after_reopen_and_rejects_changes(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1", run_id="run-1")
+    bundle = _open_bundle(tmp_path, clock)
+    try:
+        for reopened in (False, True):
+            memory = CanonicalPublicMemoryFacade(
+                canonical=CanonicalMemoryFacade(
+                    event_store=bundle.memory_events,
+                    state_store=bundle.state,
+                    search_backend=bundle.search,
+                    scope=scope,
+                ),
+                logical_scope_id="run:run-1",
+                clock=clock.now,
+            )
+            receipt = await memory.append_event_commit(
+                event_id="outcome-1",
+                kind="outcome",
+                data={"dispatch": "first"},
+                text="Calling subagent.",
+                tags=["dispatch:first"],
+            )
+            if not reopened:
+                first = receipt
+                await bundle.close()
+                bundle = _open_bundle(tmp_path, clock)
+                continue
+            assert receipt.created is False
+            assert receipt.event == first.event
+            assert receipt.event_cursor == first.event_cursor
+            for changed in (
+                {"data": {"dispatch": "second"}},
+                {"text": "Changed"},
+                {"tags": ["dispatch:second"]},
+                {"kind": "changed"},
+            ):
+                arguments = {
+                    "event_id": "outcome-1",
+                    "kind": "outcome",
+                    "data": {"dispatch": "first"},
+                    "text": "Calling subagent.",
+                    "tags": ["dispatch:first"],
+                }
+                with pytest.raises(StorageIntegrityError, match="conflicting content"):
+                    await memory.append_event_commit(**{**arguments, **changed})
+            rows = await bundle.memory_events.query(EventQuery(scope=scope))
+            assert len(rows.items) == 1
+            other_run = CanonicalPublicMemoryFacade(
+                canonical=CanonicalMemoryFacade(
+                    event_store=bundle.memory_events,
+                    state_store=bundle.state,
+                    search_backend=bundle.search,
+                    scope=StorageScope(tenant_id="tenant-1", project_id="project-1"),
+                    event_scope=StorageScope(
+                        tenant_id="tenant-1",
+                        project_id="project-1",
+                        run_id="run-2",
+                    ),
+                ),
+                logical_scope_id="run:run-1",
+                clock=clock.now,
+            )
+            with pytest.raises(StorageIntegrityError, match="conflicting content"):
+                await other_run.append_event_commit(
+                    event_id="outcome-1",
+                    kind="outcome",
+                    data={"dispatch": "first"},
+                    text="Calling subagent.",
+                    tags=["dispatch:first"],
+                )
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_event_retry_recovers_first_writer_timestamp_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1", run_id="run-1")
+    try:
+
+        def facade():
+            return CanonicalPublicMemoryFacade(
+                canonical=CanonicalMemoryFacade(
+                    event_store=bundle.memory_events,
+                    state_store=bundle.state,
+                    search_backend=bundle.search,
+                    scope=scope,
+                ),
+                logical_scope_id="run:run-1",
+                clock=clock.now,
+            )
+
+        first_writer, second_writer = facade(), facade()
+        original_get = second_writer.canonical.get_event
+        receipts = []
+
+        async def get_while_another_writer_commits(event_id):
+            existing = await original_get(event_id)
+            if not receipts:
+                receipts.append(
+                    await first_writer.append_event_commit(
+                        event_id=event_id,
+                        kind="outcome",
+                        data={"dispatch": "first"},
+                    )
+                )
+            return existing
+
+        monkeypatch.setattr(second_writer.canonical, "get_event", get_while_another_writer_commits)
+        replay = await second_writer.append_event_commit(
+            event_id="outcome-1",
+            kind="outcome",
+            data={"dispatch": "first"},
+        )
+        assert replay.created is False
+        assert replay.event == receipts[0].event
+        assert len((await bundle.memory_events.query(EventQuery(scope=scope))).items) == 1
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_public_commit_receipt_preserves_authority_and_sanitizes_projection_failure(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
