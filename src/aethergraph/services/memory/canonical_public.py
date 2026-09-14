@@ -421,6 +421,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             A projection failure is represented in the receipt and never changes the
             authoritative event result or selects another backend. Exactly one warning
             is emitted for each failed receipt when a projection logger is bound.
+            Explicit event-ID retries preserve the first authoritative timestamp.
+            Changed content or provenance still fails the store's integrity check.
         """
         resolved_topic = _topic(topic=topic, tool=tool)
         payload: dict[str, Any] = {"data": data}
@@ -436,24 +438,38 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                     "scheduled_removal": "future breaking release",
                 }
             }
-        occurred_at = _utc(self._clock())
         resolved_event_id = _identity(
             event_id if event_id is not None else self._event_id_factory()
         )
         searchable_text = text if text is not None else _text(data)
-        receipt = await self.canonical.append_event(
-            event_id=resolved_event_id,
-            occurred_at=occurred_at,
-            kind=kind,
-            stage=stage,
-            topic=resolved_topic,
-            text=searchable_text,
-            tags=_tags(tags),
-            payload=payload,
-            metrics=dict(metrics or {}),
-            severity=severity,
-            signal=signal,
-        )
+        # The public API owns the implicit timestamp. Preserve the first commit's
+        # time on an explicit-identity retry; the canonical store still validates
+        # every other immutable field, including execution provenance.
+        for attempt in range(2):
+            existing = (
+                await self.canonical.get_event(resolved_event_id) if event_id is not None else None
+            )
+            occurred_at = existing.occurred_at if existing is not None else _utc(self._clock())
+            try:
+                receipt = await self.canonical.append_event(
+                    event_id=resolved_event_id,
+                    occurred_at=occurred_at,
+                    kind=kind,
+                    stage=stage,
+                    topic=resolved_topic,
+                    text=searchable_text,
+                    tags=_tags(tags),
+                    payload=payload,
+                    metrics=dict(metrics or {}),
+                    severity=severity,
+                    signal=signal,
+                )
+                break
+            except StorageIntegrityError:
+                # Another writer may have committed after the exact lookup.
+                # Re-read once and submit through the same authoritative path.
+                if event_id is None or existing is not None or attempt:
+                    raise
         public_receipt = PublicMemoryCommitReceipt(
             event=_public_event(receipt.events[0], logical_scope_id=self.memory_scope_id),
             authoritative=True,
