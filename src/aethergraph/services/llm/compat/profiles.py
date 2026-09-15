@@ -74,7 +74,7 @@ def chat_profile_from_legacy(
         else CredentialSelection(secret_ref=profile.api_key_ref)
     )
     capability_overrides = profile.capability_overrides
-    if profile.vision_enabled and capability_overrides.image_input == "unknown":
+    if profile.vision_policy_version == 1 and profile.vision_enabled and capability_overrides.image_input == "unknown":
         capability_overrides = capability_overrides.model_copy(
             update={"image_input": "supported"}
         )
@@ -104,7 +104,7 @@ def chat_profile_from_legacy(
         ),
         input_policy=MultimodalInputPolicy(
             image_input_enabled=profile.vision_enabled,
-            allow_remote_urls=profile.vision_enabled,
+            allow_remote_urls=profile.vision_enabled if profile.vision_policy_version == 1 else profile.vision_allow_remote_urls,
             max_images=profile.vision_max_images,
             max_image_bytes=profile.vision_max_image_bytes,
             accepted_mime_prefixes=tuple(profile.vision_accepted_mime_prefixes),
@@ -117,6 +117,47 @@ def chat_profile_from_legacy(
         ),
         capability_overrides=capability_overrides,
     )
+
+
+def migrate_legacy_vision_policy(profile: LLMProfile) -> LLMProfile:
+    """Make existing vision assertions explicit without changing effective model behavior.
+
+    Intro:
+        Migrates the legacy flat-profile boundary to independent image permission,
+        remote-URL permission and capability overrides. No settings are persisted here.
+
+    Examples:
+        Preserve an existing enabled profile:
+            ```python
+            migrated = migrate_legacy_vision_policy(LLMProfile(vision_enabled=True))
+            assert migrated.capability_overrides.image_input == "supported"
+            ```
+
+        Keep an explicit profile unchanged:
+            ```python
+            profile = LLMProfile(vision_policy_version=2)
+            assert migrate_legacy_vision_policy(profile) is profile
+            ```
+
+    Args:
+        profile: Validated flat profile from the public compatibility boundary.
+
+    Returns:
+        LLMProfile: Version-two profile with behavior-preserving explicit assertions.
+
+    Notes:
+        Version-one callers remain a documented compatibility boundary. Version-two
+        image permission never supplies model capability evidence. The canonical
+        profile and its digest remain equal across this migration.
+    """
+    if profile.vision_policy_version == 2:
+        return profile
+    canonical = chat_profile_from_legacy(profile)
+    return profile.model_copy(update={
+        "vision_policy_version": 2,
+        "vision_allow_remote_urls": canonical.input_policy.allow_remote_urls,
+        "capability_overrides": canonical.capability_overrides,
+    })
 
 
 def embedding_profile_from_legacy(
@@ -265,6 +306,7 @@ def image_generation_profile_from_settings(
 
 __all__ = [
     "chat_profile_from_legacy",
+    "migrate_legacy_vision_policy",
     "embedding_profile_from_legacy",
     "image_generation_profile_from_settings",
 ]
