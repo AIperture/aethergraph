@@ -244,8 +244,8 @@ def _prepare_content_part(part: TextPart | ImageInput) -> dict[str, Any]:
     """Prepare one canonical content part for adjacent adapters.
 
     Intro:
-        Text and image values are converted into the stable internal block shapes
-        already normalized by every pinned provider adapter.
+        Text and image values are converted into the shared text/image-URL block shapes consumed by endpoint adapters.
+        Inline bytes use a data URL; only the selected adapter projects wire blocks.
 
     Examples:
         Prepare text:
@@ -274,23 +274,13 @@ def _prepare_content_part(part: TextPart | ImageInput) -> dict[str, Any]:
         return {"type": "text", "text": part.text}
     if part.url:
         return {"type": "image_url", "image_url": {"url": part.url}}
-    if part.b64 is not None and part.mime_type:
+    encoded = part.b64
+    if part.data is not None:
+        encoded = base64.b64encode(part.data).decode("ascii")
+    if encoded is not None and part.mime_type:
         return {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": part.mime_type,
-                "data": part.b64,
-            },
-        }
-    if part.data is not None and part.mime_type:
-        return {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": part.mime_type,
-                "data": base64.b64encode(part.data).decode("ascii"),
-            },
+            "type": "image_url",
+            "image_url": {"url": f"data:{part.mime_type};base64,{encoded}"},
         }
     raise ValueError("ImagePart requires a URL or bytes/base64 with MIME type")
 

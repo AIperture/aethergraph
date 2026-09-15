@@ -27,6 +27,9 @@ _SUPPORTED_RASTER_MIME_TYPES = {
 class MediaPreparationError(ValueError):
     """Reject unsafe, unsupported, or undecodable model media input."""
 
+    code = "media_preparation_failed"
+    stage = "media_preparation"
+
 
 @dataclass(frozen=True)
 class ImagePreparationPolicy:
@@ -508,6 +511,11 @@ def prepare_image_bytes(
     try:
         with Image.open(io.BytesIO(data)) as image:
             source_format = str(image.format or "").upper()
+            actual_mime = Image.MIME.get(source_format, "").lower()
+            if actual_mime != normalized_mime:
+                raise MediaPreparationError(
+                    f"image MIME does not match decoded content: {normalized_mime} != {actual_mime or 'unknown'}"
+                )
             image.load()
             image = ImageOps.exif_transpose(image)
             if not isinstance(image.size, tuple) or len(image.size) != 2:
