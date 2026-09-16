@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from aethergraph.services.llm.profiles import (
     ChatCapabilityOverrides,
@@ -13,6 +13,12 @@ from aethergraph.services.llm.providers import Provider
 
 
 class LLMProfile(BaseModel):
+    @field_validator("vision_policy_version", mode="before")
+    @classmethod
+    def _parse_vision_policy_version(cls, value):
+        # Nested dotenv fields arrive as strings; preserve the closed version set.
+        return int(value) if value in ("1", "2") else value
+
     provider: Provider = "openai"
     model: str = "gpt-4o-mini"
     endpoint_id: str | None = Field(
@@ -83,6 +89,10 @@ class LLMProfile(BaseModel):
     )
 
     # explicit multimodal capability metadata
+    vision_policy_version: Literal[1, 2] = Field(
+        default=1, description="Version 1 retains legacy vision assertions; version 2 separates input permission and capabilities."
+    )
+    vision_allow_remote_urls: bool = False
     vision_enabled: bool = Field(
         default=False,
         description="Whether this profile's loaded model is allowed to receive image inputs.",

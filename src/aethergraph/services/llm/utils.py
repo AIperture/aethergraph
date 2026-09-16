@@ -468,7 +468,11 @@ def _normalize_openai_responses_input(
                 elif t == "image_url":
                     url = (p.get("image_url") or {}).get("url") or p.get("url")
                     if isinstance(url, str):
-                        blocks.append({"type": "input_image", "image_url": url})
+                        block = {"type": "input_image", "image_url": url}
+                        detail = (p.get("image_url") or {}).get("detail")
+                        if detail is not None:
+                            block["detail"] = detail
+                        blocks.append(block)
                     else:
                         raise ValueError(
                             f"content[{part_index}] image requires a source URL"

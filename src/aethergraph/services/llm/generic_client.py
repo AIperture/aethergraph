@@ -1681,6 +1681,21 @@ class GenericLLMClient(LLMClientProtocol):
             if role is not None:
                 total += self._estimate_text_tokens(str(role))
             content = message.get("content")
+            if isinstance(content, list):
+                # Temporary text-only estimate: image tokens are intentionally
+                # ignored. Base64/URL length is transport size, not image token
+                # cost. Filter only canonical prepared image blocks; do not alter
+                # the request sent to the provider. This is not a full-context
+                # capacity guarantee until model-aware image accounting exists.
+                content = [
+                    part for part in content
+                    if not (
+                        isinstance(part, dict)
+                        and part.get("type") == "image_url"
+                    )
+                ]
+                if not content:
+                    continue
             if content is None:
                 continue
             if isinstance(content, str):
@@ -1745,8 +1760,9 @@ class GenericLLMClient(LLMClientProtocol):
 
         Notes:
             The current implementation is deliberately labelled
-            ``approximate_chars_div_4``. It is suitable for admission warnings,
-            not billing.
+            ``approximate_chars_div_4_images_excluded``. Image tokens are
+            intentionally ignored; this is a text-only compaction heuristic,
+            not a complete context-capacity check or billing estimate.
         """
 
         estimated_input_tokens = self._estimate_messages_tokens(messages)
@@ -1784,7 +1800,7 @@ class GenericLLMClient(LLMClientProtocol):
             reserved_output_tokens=reserved_output_tokens,
             estimated_total_tokens=estimated_input_tokens + reserved_output_tokens,
             context_window_tokens=self.context_window_tokens,
-            source="approximate_chars_div_4",
+            source="approximate_chars_div_4_images_excluded",
         )
 
     def estimate(self, request: ModelRequest) -> LLMRequestEstimate:

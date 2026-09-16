@@ -77,3 +77,17 @@ restart long-lived workers so their cached catalog reloads, and verify the catal
 digest from that interpreter. Updating a Studio host alone does not update an
 existing project interpreter. Explicit `model="gpt-image-2"` calls still select that
 model until their author changes them.
+
+## Canonical inline image projection
+
+`prepare_model_request` projects admitted bytes/base64 into the existing shared
+`image_url` data-URL representation. Responses, Chat Completions, Azure, Anthropic and
+Gemini consume that one preparation contract through their existing adapters. No
+caller serializer or remote-URL conversion is required. Active preparation decodes
+inline data URLs too; they are not a bypass. Declared image MIME must match decoded
+content, whether resizing is enabled or disabled. Preparation and unsupported
+capability failures expose stable local stage/code metadata.
+
+Streaming/native-tool combinations remain governed by the existing adapter contract.
+Azure Responses is Tool-only and does not implement streaming; canonical streaming
+currently does not accept a Tool catalog. These requests fail before transport.

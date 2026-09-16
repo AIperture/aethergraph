@@ -218,6 +218,9 @@ class LLMError(RuntimeError):
 
 
 class LLMUnsupportedFeatureError(LLMError):
+    code = "model_capability_unsupported"
+    stage = "capability_admission"
+
     def __init__(
         self, provider: str, model: str | None, feature: str, detail: str | None = None
     ):

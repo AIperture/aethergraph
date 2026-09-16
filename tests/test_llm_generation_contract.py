@@ -146,9 +146,9 @@ def test_canonical_request_preparation_preserves_multimodal_and_tool_messages() 
     assert [part["type"] for part in messages[0]["content"]] == [
         "text",
         "image_url",
-        "image",
+        "image_url",
     ]
-    assert messages[0]["content"][2]["source"]["data"] == "aW1hZ2U="
+    assert messages[0]["content"][2]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
     assert messages[1]["tool_call_id"] == "call_1"
 
 
