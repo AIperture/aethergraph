@@ -1718,6 +1718,35 @@ def _purge(
     if not candidate_ids:
         return replace(preview, dry_run=False)
 
+    deleted_observations, deleted_manifests, deleted_fragments = _delete_observation_ids(
+        connection, candidate_ids
+    )
+    return ObservationPurgeResult(
+        dry_run=False,
+        matching_traces=preview.matching_traces,
+        matching_observations=preview.matching_observations,
+        matching_manifests=preview.matching_manifests,
+        exclusive_fragment_bytes=preview.exclusive_fragment_bytes,
+        shared_fragment_bytes_retained=preview.shared_fragment_bytes_retained,
+        estimated_reclaimed_bytes=preview.estimated_reclaimed_bytes,
+        deleted_observations=deleted_observations,
+        deleted_manifests=deleted_manifests,
+        deleted_fragments=deleted_fragments,
+    )
+
+
+def _delete_observation_ids(
+    connection: sqlite3.Connection, candidate_ids: tuple[str, ...]
+) -> tuple[int, int, int]:
+    """Remove exact selected evidence, reclaiming only unreferenced fragments."""
+    if not candidate_ids:
+        return 0, 0, 0
+    if len(candidate_ids) > 400:
+        totals = [0, 0, 0]
+        for offset in range(0, len(candidate_ids), 400):
+            counts = _delete_observation_ids(connection, candidate_ids[offset : offset + 400])
+            totals = [left + right for left, right in zip(totals, counts, strict=False)]
+        return tuple(totals)
     placeholders = ",".join("?" for _ in candidate_ids)
     manifest_rows = connection.execute(
         """
@@ -1755,21 +1784,12 @@ def _purge(
             "WHERE m.request_fragment_id = local_observation_fragments.fragment_id "
             "OR m.trace_fragment_id = local_observation_fragments.fragment_id) "
             "AND NOT EXISTS (SELECT 1 FROM local_llm_calls l "
-            "WHERE l.response_fragment_id = local_observation_fragments.fragment_id)",
+            "WHERE l.response_fragment_id = local_observation_fragments.fragment_id) "
+            "AND NOT EXISTS (SELECT 1 FROM local_observations o "
+            "WHERE o.payload_fragment_id = local_observation_fragments.fragment_id)",
             fragment_ids,
         ).rowcount
-    return ObservationPurgeResult(
-        dry_run=False,
-        matching_traces=preview.matching_traces,
-        matching_observations=preview.matching_observations,
-        matching_manifests=preview.matching_manifests,
-        exclusive_fragment_bytes=preview.exclusive_fragment_bytes,
-        shared_fragment_bytes_retained=preview.shared_fragment_bytes_retained,
-        estimated_reclaimed_bytes=preview.estimated_reclaimed_bytes,
-        deleted_observations=deleted_observations,
-        deleted_manifests=deleted_manifests,
-        deleted_fragments=deleted_fragments,
-    )
+    return deleted_observations, deleted_manifests, deleted_fragments
 
 
 def _purge_candidates(
@@ -1891,8 +1911,11 @@ def _fragment_ids_for_observations(
         "WHERE l.observation_id IN (" + placeholders + ") AND m.request_fragment_id IS NOT NULL "
         "UNION SELECT m.trace_fragment_id FROM local_observation_manifests m "
         "JOIN local_llm_calls l ON l.prompt_manifest_id = m.manifest_id "
-        "WHERE l.observation_id IN (" + placeholders + ") AND m.trace_fragment_id IS NOT NULL",
-        (*observation_ids, *observation_ids, *observation_ids),
+        "WHERE l.observation_id IN (" + placeholders + ") AND m.trace_fragment_id IS NOT NULL "
+        "UNION SELECT payload_fragment_id FROM local_observations WHERE observation_id IN ("
+        + placeholders
+        + ") AND payload_fragment_id IS NOT NULL",
+        (*observation_ids, *observation_ids, *observation_ids, *observation_ids),
     ).fetchall()
     return tuple(str(row[0]) for row in rows)
 
