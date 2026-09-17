@@ -103,3 +103,6 @@ def local_cleanup_owner(workspace_root: Path) -> StorageScope:
     owner = read_local_workspace_manifest(root).owner_scope
     validate_storage_owner_scope(owner)
     return owner
+
+
+__all__ = ["StorageScope", "local_cleanup_owner", "purge_local_sessions"]
