@@ -143,3 +143,55 @@ async def test_confirmed_process_loss_allows_stale_running_history(tmp_path):
         assert await reopened.runs.get(StorageScope(project_id="project-1"), "run-1") is None
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_history_uses_manifest_owner_without_tenant(tmp_path):
+    from aethergraph.config.storage_provider import StorageProviderSettings
+    from aethergraph.maintenance import local_cleanup_owner, purge_local_sessions
+    from aethergraph.services.clock.clock import SystemClock
+    from aethergraph.storage.contracts import (
+        StorageConfigurationError,
+        StorageOpenMode,
+        StorageOpenRequest,
+    )
+    from aethergraph.storage.providers.local_sqlite import LocalStorageProvider
+
+    owner = StorageScope(project_id="workspace-local-runtime")
+    selection = StorageProviderSettings(provider="local.sqlite").to_selection()
+
+    def open_bundle():
+        return LocalStorageProvider(
+            continuation_token_secret_ref=selection.config["continuation_token_secret_ref"],
+            continuation_token_secret=b"x" * 32,
+        ).open(
+            StorageOpenRequest(
+                workspace_id="workspace-local-runtime",
+                workspace_root=tmp_path.resolve(),
+                owner_scope=owner,
+                selection=selection,
+                mode=StorageOpenMode.READ_WRITE,
+                expected_format_version=1,
+                clock=SystemClock(),
+                secrets=None,
+            )
+        )
+
+    bundle = open_bundle()
+    for sid in ("session-1", "keep"):
+        await bundle.sessions.create(
+            replace(_session(sid), scope=StorageScope(project_id=owner.project_id, session_id=sid))
+        )
+    await bundle.close()
+    assert local_cleanup_owner(tmp_path) == owner
+    with pytest.raises(StorageConfigurationError, match="owner"):
+        await purge_local_sessions(
+            tmp_path, owner_scope=StorageScope(project_id="wrong"), session_ids=("session-1",)
+        )
+    await purge_local_sessions(tmp_path, owner_scope=owner, session_ids=("session-1",))
+    bundle = open_bundle()
+    try:
+        assert await bundle.sessions.get(owner, "session-1") is None
+        assert await bundle.sessions.get(owner, "keep") is not None
+    finally:
+        await bundle.close()

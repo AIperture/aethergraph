@@ -4,6 +4,7 @@ from pathlib import Path
 import secrets
 
 from aethergraph.config.storage_provider import StorageProviderSettings
+from aethergraph.services.canonical_storage_scope import validate_storage_owner_scope
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.storage.contracts import (
     StorageConfigurationError,
@@ -11,7 +12,6 @@ from aethergraph.storage.contracts import (
     StorageOpenRequest,
     StorageProviderSelection,
     StorageScope,
-    storage_scope_matches_filter,
 )
 from aethergraph.storage.providers.local_sqlite import (
     LocalStorageProvider,
@@ -43,7 +43,7 @@ async def purge_local_sessions(
 
     Args:
         workspace_root: Authorized canonical AG workspace, never a source directory.
-        owner_scope: Required tenant/project authorization constraint.
+        owner_scope: Exact storage owner captured from the authorized workspace.
         session_ids: Exact session identities owned by the caller's deletion scope.
         selection: Original provider configuration; defaults to built-in local settings.
         stopped_session_ids: Selected sessions whose execution process is confirmed gone.
@@ -62,12 +62,9 @@ async def purge_local_sessions(
     if root.resolve(strict=True) != root:
         raise StorageConfigurationError("Runtime maintenance cannot follow substituted paths")
     manifest = read_local_workspace_manifest(root)
-    if (
-        not owner_scope.tenant_id
-        or not owner_scope.project_id
-        or not storage_scope_matches_filter(manifest.owner_scope, owner_scope)
-    ):
+    if manifest.owner_scope != owner_scope:
         raise StorageConfigurationError("Runtime maintenance owner does not match the workspace")
+    validate_storage_owner_scope(owner_scope)
     selected = selection or StorageProviderSettings(provider="local.sqlite").to_selection()
     reference = selected.config["continuation_token_secret_ref"]
     bundle = LocalStorageProvider(
@@ -91,3 +88,18 @@ async def purge_local_sessions(
         )
     finally:
         await bundle.close()
+
+
+def local_cleanup_owner(workspace_root: Path) -> StorageScope:
+    """Read the storage owner of an already-authorized canonical runtime workspace.
+
+    The application must authorize the path first and retain this identity in its
+    cleanup receipt. Storage ownership is independent of application project IDs.
+    This function neither opens databases nor starts a runtime.
+    """
+    root = Path(workspace_root).absolute()
+    if root.resolve(strict=True) != root:
+        raise StorageConfigurationError("Runtime maintenance cannot follow substituted paths")
+    owner = read_local_workspace_manifest(root).owner_scope
+    validate_storage_owner_scope(owner)
+    return owner

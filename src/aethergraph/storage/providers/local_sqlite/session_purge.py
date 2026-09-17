@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from aethergraph.services.canonical_storage_scope import validate_storage_owner_scope
+
 from ...contracts import (
     StorageConfigurationError,
     StorageConflictError,
@@ -44,10 +46,7 @@ class LocalSessionPurge:
         stopped_session_ids: tuple[str, ...] = (),
     ) -> None:
         """Delete exact sessions and their evidence; retry resumes the same receipt."""
-        if not owner.tenant_id or not owner.project_id or owner.session_id or owner.run_id:
-            raise StorageConfigurationError(
-                "Session deletion requires a tenant/project owner scope"
-            )
+        validate_storage_owner_scope(owner)
         if not session_ids or any(
             not isinstance(value, str) or not value.strip() for value in session_ids
         ):
