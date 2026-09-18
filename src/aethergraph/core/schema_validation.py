@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import re
 from typing import Any
@@ -26,6 +26,84 @@ class SchemaValidationIssue:
     repair_hint: str = ""
 
 
+@dataclass(frozen=True)
+class SchemaValidationReport:
+    """Carry ordered independent issues and the number omitted by the caller's limit."""
+
+    issues: tuple[SchemaValidationIssue, ...]
+    omitted_count: int = 0
+
+
+def collect_schema_issues(
+    value: Any,
+    schema: Mapping[str, Any],
+    *,
+    path: str = "$",
+    max_issues: int = 16,
+    validator_class: Any = Draft202012Validator,
+) -> SchemaValidationReport:
+    """Collect bounded independent JSON Schema diagnostics in deterministic order.
+
+    Intro:
+        Uses the canonical validator and selects only the known discriminator branch.
+        Invalid parent types naturally prevent dependent child checks.
+
+    Examples:
+        Accept valid input:
+        ```python
+        assert not collect_schema_issues(1, {"type": "integer"}).issues
+        ```
+
+        Locate invalid input:
+        ```python
+        assert collect_schema_issues("x", {"type": "integer"}).issues[0].path == "$"
+        ```
+
+    Args:
+        value: Value to validate.
+        schema: Canonical Draft 2020-12 schema.
+        path: Diagnostic root.
+        max_issues: Positive maximum number of returned issues.
+        validator_class: JSON Schema validator preserving the caller's type vocabulary.
+
+    Returns:
+        SchemaValidationReport: Bounded issues and an explicit omitted count.
+
+    Notes:
+        Non-discriminated alternatives remain one specific union issue. Each message
+        is limited to 500 characters; canonical values are not modified.
+    """
+    if max_issues < 1:
+        raise ValueError("max_issues must be positive")
+    issues: dict[tuple[str, str, str], SchemaValidationIssue] = {}
+
+    def collect(error: ValidationError) -> None:
+        branch = _discriminated_union_errors(error)
+        if isinstance(branch, list) and branch:
+            for child in branch:
+                collect(child)
+            return
+        selected = (
+            branch if isinstance(branch, SchemaValidationIssue) else _select_specific_error(error)
+        )
+        issue = _issue_from_error(selected, path=path)
+        issue = replace(
+            issue,
+            path=issue.path[:500],
+            schema_path=issue.schema_path[:500],
+            message=issue.message[:500],
+            repair_hint=issue.repair_hint[:500],
+        )
+        issues[(issue.path, issue.schema_path, issue.message)] = issue
+
+    for error in validator_class(dict(schema)).iter_errors(value):
+        collect(error)
+    ordered = sorted(
+        issues.values(), key=lambda issue: (issue.path, issue.schema_path, issue.message)
+    )
+    return SchemaValidationReport(tuple(ordered[:max_issues]), max(0, len(ordered) - max_issues))
+
+
 def first_schema_issue(
     value: Any,
     schema: Mapping[str, Any],
@@ -45,7 +123,15 @@ def first_schema_issue(
     error = errors[0] if len(errors) == 1 else best_match(errors)
     if error is None:
         return None
-    selected = _select_specific_error(error)
+    return _issue_from_error(_select_specific_error(error), path=path)
+
+
+def _issue_from_error(
+    selected: ValidationError | SchemaValidationIssue,
+    *,
+    path: str,
+) -> SchemaValidationIssue:
+    """Project a selected diagnostic through the shared path/value representation."""
     if isinstance(selected, SchemaValidationIssue):
         return SchemaValidationIssue(
             path=_join_instance_path(path, selected.path),
@@ -100,6 +186,7 @@ def _additional_properties_issue(
     ]
     if not extras:
         return None
+    extras.sort()
     first_field = extras[0]
     quoted = ", ".join(repr(item) for item in extras)
     return SchemaValidationIssue(
@@ -162,6 +249,16 @@ def _matched_required_fields(schema: Any, instance: dict[str, Any]) -> list[str]
 def _discriminated_union_issue(
     error: ValidationError,
 ) -> SchemaValidationIssue | ValidationError | None:
+    selected = _discriminated_union_errors(error)
+    if isinstance(selected, SchemaValidationIssue):
+        return selected
+    nested = best_match(selected) if selected else None
+    return _select_specific_error(nested) if nested is not None else None
+
+
+def _discriminated_union_errors(
+    error: ValidationError,
+) -> SchemaValidationIssue | list[ValidationError] | None:
     if error.validator not in {"oneOf", "anyOf"} or not isinstance(error.instance, dict):
         return None
     branches = list(error.validator_value or [])
@@ -209,8 +306,7 @@ def _discriminated_union_issue(
         and len(tuple(item.absolute_schema_path)) > len(parent_schema_path)
         and tuple(item.absolute_schema_path)[len(parent_schema_path)] == selected_index
     ]
-    nested = best_match(matching)
-    return _select_specific_error(nested) if nested is not None else None
+    return matching
 
 
 def _join_instance_path(root: str, segments: Any) -> str:
@@ -219,6 +315,8 @@ def _join_instance_path(root: str, segments: Any) -> str:
     for segment in raw_segments:
         if isinstance(segment, int):
             result += f"[{segment}]"
+        elif result and str(segment).startswith("["):
+            result += str(segment)
         elif result:
             result += f".{segment}"
         else:
@@ -247,6 +345,7 @@ def _bounded_json(value: Any, *, limit: int = 500) -> str:
         text = json.dumps(
             value,
             ensure_ascii=False,
+            sort_keys=True,
             separators=(",", ":"),
             default=str,
         )
@@ -255,4 +354,9 @@ def _bounded_json(value: Any, *, limit: int = 500) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-__all__ = ["SchemaValidationIssue", "first_schema_issue"]
+__all__ = [
+    "SchemaValidationIssue",
+    "SchemaValidationReport",
+    "collect_schema_issues",
+    "first_schema_issue",
+]
