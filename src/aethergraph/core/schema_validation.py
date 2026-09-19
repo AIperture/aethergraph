@@ -99,7 +99,8 @@ def collect_schema_issues(
     for error in validator_class(dict(schema)).iter_errors(value):
         collect(error)
     ordered = sorted(
-        issues.values(), key=lambda issue: (issue.path, issue.schema_path, issue.message)
+        issues.values(),
+        key=lambda issue: (issue.path == path, issue.path, issue.schema_path, issue.message),
     )
     return SchemaValidationReport(tuple(ordered[:max_issues]), max(0, len(ordered) - max_issues))
 
