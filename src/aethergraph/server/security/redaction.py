@@ -8,6 +8,7 @@ from typing import Any
 
 _DATA_URL_RE = re.compile(r"data:([^;,]+)(?:;[^,]*)?,[^\s\"']+")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_API_TOKEN_RE = re.compile(r"(?i)\bsk-[a-z0-9_-]{8,}")
 _ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*[^\s,;]+"
 )
@@ -70,6 +71,7 @@ def sanitize_content(value: Any) -> Any:
     if isinstance(value, str):
         sanitized = _DATA_URL_RE.sub(lambda match: f"[redacted data URL: {match.group(1)}]", value)
         sanitized = _BEARER_RE.sub("Bearer [redacted credential]", sanitized)
+        sanitized = _API_TOKEN_RE.sub(REDACTED_CREDENTIAL, sanitized)
         return _ASSIGNMENT_RE.sub(
             lambda match: f"{match.group(1)}={REDACTED_CREDENTIAL}", sanitized
         )
