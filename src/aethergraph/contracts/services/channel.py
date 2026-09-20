@@ -149,6 +149,28 @@ class ChannelAttachment:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "alt_text", alt_text)
 
+    def validate_mime(self, mime: str) -> None:
+        """Validate presentation against authoritative artifact MIME.
+
+        Intro:
+            Both publishers and Channel delivery use this compatibility rule.
+
+        Examples:
+            ChannelAttachment("plot", presentation="image").validate_mime("image/png")
+            ChannelAttachment("report", presentation="file").validate_mime("text/plain")
+
+        Args:
+            mime: MIME read from canonical artifact metadata.
+
+        Returns:
+            None: Raises ValueError when presentation is incompatible.
+
+        Notes:
+            This does not resolve or authorize the artifact itself.
+        """
+        if self.presentation == "image" and not mime.strip().lower().startswith("image/"):
+            raise ValueError(f"Artifact {self.artifact_id} is not an image ({mime})")
+
 
 @dataclass(frozen=True, slots=True)
 class ChannelAction:

@@ -893,10 +893,7 @@ class ChannelSession:
                     )
                 descriptor = _artifact_to_chat_file(artifact)
                 mimetype = str(descriptor.get("mimetype") or "application/octet-stream")
-                if attachment.presentation == "image" and not mimetype.startswith("image/"):
-                    raise ValueError(
-                        f"Artifact {attachment.artifact_id} is not an image ({mimetype})"
-                    )
+                attachment.validate_mime(mimetype)
                 raw_size = descriptor.get("size")
                 if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
                     raise ValueError(
