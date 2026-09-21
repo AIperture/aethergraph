@@ -218,6 +218,18 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
         session_id="missing-session",
     )
     engine_events = await facade.list_engine_events(run_id="run-1")
+    assert await facade.page_runs(limit=1, session_id="session-1") == {
+        "items": session_runs,
+        "next_cursor": None,
+    }
+    assert await facade.page_engine_events(run_id="run-1", limit=1) == {
+        "items": engine_events,
+        "next_cursor": None,
+    }
+    assert await facade.page_runs(session_id="missing-session") == {
+        "items": [],
+        "next_cursor": None,
+    }
     suppressed = await facade.list_suppressed_scopes()
     manifest = await facade.hydrate_prompt_manifest("manifest-1")
     retained_artifact = await facade.read_artifact_bytes("artifact-1")

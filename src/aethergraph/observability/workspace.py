@@ -350,6 +350,87 @@ class _CanonicalObservabilityFacade:
                 return result
             cursor = page.next_cursor
 
+    async def page_runs(
+        self, *, limit: int = 100, cursor: str | None = None, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Read one provider-cursor page without offset replay or a history ceiling.
+
+        Intro:
+            Apply canonical scope and continuation validation before projecting a page.
+
+        Examples:
+            ```python
+            first = await facade.page_runs(limit=100, session_id="session-1")
+            ```
+
+            Continue the same scope:
+            ```python
+            next_page = await facade.page_runs(limit=100, cursor=first["next_cursor"], session_id="session-1")
+            ```
+        Args:
+            limit: Provider page size, at most 1,000.
+            cursor: Opaque provider continuation for the same scope.
+            session_id: Optional exact session constraint applied by storage.
+        Returns:
+            dict: Stable run mappings and an opaque next_cursor.
+        Notes:
+            Canonical storage owns cursor validation, ordering, and authorization.
+        """
+        page_request = PageRequest(limit=limit, cursor=cursor)
+        bundle = await self._bundle()
+        scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
+        if scope is None:
+            return {"items": [], "next_cursor": None}
+        page = await bundle.runs.query(RunQuery(scope=scope, page=page_request))
+        return {
+            "items": [asdict(project_canonical_run_record(record)) for record in page.items],
+            "next_cursor": page.next_cursor,
+        }
+
+    async def page_engine_events(
+        self, *, run_id: str, limit: int = 100, cursor: str | None = None
+    ) -> dict[str, Any]:
+        """Read one exact run's canonical Engine-event page in causal storage order.
+
+        Intro:
+            Apply exact owner/run scope and return one ascending provider page.
+
+        Examples:
+            ```python
+            page = await facade.page_engine_events(run_id="run-1", limit=100)
+            ```
+
+            Continue the same run:
+            ```python
+            next_page = await facade.page_engine_events(run_id="run-1", cursor=page["next_cursor"])
+            ```
+        Args:
+            run_id: Exact canonical run identity.
+            limit: Provider page size, at most 1,000.
+            cursor: Opaque continuation for that run.
+        Returns:
+            dict: Stable Engine-event mappings and next_cursor.
+        Notes:
+            This boundary performs no Engine interpretation and drains no pages.
+        """
+        page_request = PageRequest(limit=limit, cursor=cursor)
+        bundle = await self._bundle()
+        scope = self._query_scope(run_id=run_id)
+        if scope is None:
+            return {"items": [], "next_cursor": None}
+        page = await bundle.memory_events.query(
+            EventQuery(
+                scope=scope,
+                tags=("agent_engine",),
+                order=SortDirection.ASCENDING,
+                page=page_request,
+            )
+        )
+        return {
+            "items": [_event_mapping(record) for record in page.items],
+            "next_cursor": page.next_cursor,
+        }
+
     async def list_runs(
         self,
         *,
@@ -393,31 +474,20 @@ class _CanonicalObservabilityFacade:
             Offset plus limit may not exceed 10,000; provider access remains cursor-based.
         """
         _validate_window(limit, offset)
-        bundle = await self._bundle()
-        scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
-        if scope is None:
-            return []
         wanted = limit + offset
         records = []
         cursor = None
         while len(records) < wanted:
-            page = await bundle.runs.query(
-                RunQuery(
-                    scope=scope,
-                    page=PageRequest(
-                        limit=min(_HISTORICAL_PAGE_SIZE, wanted - len(records)),
-                        cursor=cursor,
-                    ),
-                )
+            page = await self.page_runs(
+                limit=min(_HISTORICAL_PAGE_SIZE, wanted - len(records)),
+                cursor=cursor,
+                session_id=session_id,
             )
-            records.extend(page.items)
-            if page.next_cursor is None:
+            records.extend(page["items"])
+            cursor = page["next_cursor"]
+            if cursor is None:
                 break
-            cursor = page.next_cursor
-        return [
-            asdict(project_canonical_run_record(record))
-            for record in records[offset : offset + limit]
-        ]
+        return records[offset : offset + limit]
 
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
         """Read one authoritative canonical run visible to the identity.
@@ -480,30 +550,21 @@ class _CanonicalObservabilityFacade:
         Notes:
             Engine interpretation remains outside AG; more than 10,000 rows fails closed.
         """
-        bundle = await self._bundle()
-        scope = self._query_scope(run_id=run_id)
-        if scope is None:
-            return []
         records = []
         cursor = None
         while True:
-            page = await bundle.memory_events.query(
-                EventQuery(
-                    scope=scope,
-                    tags=("agent_engine",),
-                    order=SortDirection.ASCENDING,
-                    page=PageRequest(limit=_HISTORICAL_PAGE_SIZE, cursor=cursor),
-                )
+            page = await self.page_engine_events(
+                run_id=run_id, limit=_HISTORICAL_PAGE_SIZE, cursor=cursor
             )
-            records.extend(page.items)
+            records.extend(page["items"])
             if len(records) > _HISTORICAL_RESULT_LIMIT:
                 raise ObservabilityUnavailableError(
                     "Historical Engine events exceed the bounded read ceiling"
                 )
-            if page.next_cursor is None:
+            cursor = page["next_cursor"]
+            if cursor is None:
                 break
-            cursor = page.next_cursor
-        return [_event_mapping(record) for record in records]
+        return records
 
     async def read_memory_state(
         self,
@@ -544,8 +605,8 @@ class _CanonicalObservabilityFacade:
             Only trusted read projections supply memory_scope. Owner/identity conflicts fail closed.
         """
         from aethergraph.services.memory.canonical_facade import (
-            _memory_state_namespace,
             _memory_state_key,
+            _memory_state_namespace,
         )
 
         hidden = await self.list_suppressed_scopes(session_id=session_id)
