@@ -201,6 +201,8 @@ def create_app(
                     await retention_task
 
             try:
+                if container.run_manager is not None:
+                    await container.run_manager.close()
                 await container.close_storage()
             except Exception:
                 logger.exception("Error closing canonical storage")

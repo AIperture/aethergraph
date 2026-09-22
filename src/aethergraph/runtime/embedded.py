@@ -142,10 +142,12 @@ class EmbeddedRuntime:
         self._output_capture: RuntimeOutputCaptureHost | None = None
         self._semantic_stores: dict[str, SemanticEventStore] = {}
         self._integration: RuntimeIntegration | None = None
-        self._active_run_ids: set[str] = set()
+        self._graphs_loaded = False
+        self._timer_started = False
         self._readiness_lock = asyncio.Lock()
         self._ready = False
         self._closed = False
+        self._closing = False
 
     async def start(self) -> None:
         """Establish storage readiness before publishing this runtime to callers.
@@ -210,11 +212,7 @@ class EmbeddedRuntime:
         """
 
         composition = getattr(self._container, "storage_composition", None)
-        return (
-            composition.startup_diagnostic
-            if composition is not None
-            else None
-        )
+        return composition.startup_diagnostic if composition is not None else None
 
     @contextmanager
     def activate(self) -> Iterator[None]:
@@ -301,6 +299,7 @@ class EmbeddedRuntime:
             raise RuntimeGraphLoadError(
                 f"Module {module_name!r} did not register declared graph {graph_id!r}."
             )
+        self._graphs_loaded = True
         return RuntimeGraphRegistration(
             module_name=module_name,
             symbol_name=symbol_name,
@@ -458,7 +457,6 @@ class EmbeddedRuntime:
                 app_name=request.app_name,
                 run_config=dict(request.run_config),
             )
-        self._active_run_ids.add(record.run_id)
         return _public_record(record)
 
     async def cancel(
@@ -562,10 +560,8 @@ class EmbeddedRuntime:
         if record is None:
             return None
         status = getattr(record.status, "value", str(record.status))
-        if status in {"succeeded", "failed", "canceled"}:
-            if self._output_capture is not None:
-                await self._output_capture.flush_run(run_id)
-            self._active_run_ids.discard(run_id)
+        if status in {"succeeded", "failed", "canceled"} and self._output_capture is not None:
+            await self._output_capture.flush_run(run_id)
         output: Mapping[str, Any] | None = None
         result_store = self._container.run_result_store
         if status == "succeeded" and result_store is not None:
@@ -1257,13 +1253,15 @@ class EmbeddedRuntime:
         async with self._readiness_lock:
             if self._closed:
                 return
+            self._closing = True
+            # Stop ingress before joining every run owned by the manager, including
+            # children submitted by graph code. Keep storage open if either fails.
+            if self._timer_started:
+                await self._container.continuation_timer.stop()
+                self._timer_started = False
+            if self._container.run_manager is not None:
+                await self._container.run_manager.close()
             failures: list[str] = []
-            for run_id in tuple(self._active_run_ids):
-                try:
-                    await self._require_run_manager().cancel_run(run_id)
-                except Exception as exc:  # noqa: BLE001
-                    failures.append(f"cancel {run_id}: {exc}")
-            self._active_run_ids.clear()
             if self._output_capture is not None:
                 try:
                     await self._output_capture.close()
@@ -1282,18 +1280,24 @@ class EmbeddedRuntime:
                 raise RuntimeError("Embedded runtime close failed: " + "; ".join(failures))
 
     def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("Embedded runtime is closed.")
+        if self._closed or self._closing:
+            raise RuntimeError("Embedded runtime is closing or closed.")
 
     async def _ensure_ready(self) -> None:
         self._ensure_open()
-        if self._ready:
+        if self._ready and (self._timer_started or not self._graphs_loaded):
             return
         async with self._readiness_lock:
-            if self._ready:
-                return
-            await self._container.start_storage()
-            self._ready = True
+            self._ensure_open()
+            if not self._ready:
+                await self._container.start_storage()
+                self._ready = True
+            if self._graphs_loaded and not self._timer_started:
+                # Graph registration precedes recovery. Starting a timer on mere
+                # storage reads could consume waits before their graph is loaded.
+                with self.activate():
+                    await self._container.continuation_timer.start()
+                self._timer_started = True
 
     def _require_run_manager(self) -> Any:
         self._ensure_open()
