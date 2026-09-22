@@ -111,6 +111,46 @@ class RunFacade:
             return {}
         return {"origin_binding": self.origin_binding.model_dump(mode="json")}
 
+    async def inspect_run(self, run_id: str) -> RunRecord:
+        """Read current run metadata without waiting or affecting execution.
+
+        Reads the canonical run store and restricts the result to this facade's
+        session and tenant. Missing and out-of-scope identities both fail lookup.
+
+        Examples:
+            Inspect a submitted child:
+            ```python
+            record = await context.runner().inspect_run(child_run_id)
+            print(record.status.value)
+            ```
+
+            Inspect the current run:
+            ```python
+            record = await context.runner().inspect_run(context.run_id)
+            print(record.result_available)
+            ```
+
+        Args:
+            run_id: Exact canonical run identity.
+
+        Returns:
+            RunRecord: Current metadata, including completion and result availability.
+
+        Notes:
+            This observation neither requests cancellation nor waits for completion.
+            Result payloads remain available through `wait_run(return_outputs=True)`.
+        """
+        if not run_id:
+            raise ValueError("Run inspection requires an exact run identity")
+        record = await self.run_manager.get_record(run_id)
+        if record is None or (self.session_id is not None and record.session_id != self.session_id):
+            raise LookupError("Run does not exist in the caller scope")
+        if self.identity is not None and (
+            record.org_id != self.identity.org_id or record.user_id != self.identity.user_id
+        ):
+            raise LookupError("Run does not exist in the caller scope")
+        return record
+
     async def spawn_run(
         self,
         graph_id: str,
