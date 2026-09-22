@@ -164,6 +164,7 @@ class RunManager:
         self._session_root_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_root_turn_locks_lock = asyncio.Lock()
         self._background_tasks: dict[str, asyncio.Task] = {}
+        self._owned_run_ids: set[str] = set()
         self._closing = False
         self._admissions_in_progress = 0
         self._admissions_drained = asyncio.Event()
@@ -188,6 +189,14 @@ class RunManager:
                 run_id,
                 exc_info=(type(error), error, error.__traceback__),
             )
+        elif not task.cancelled():
+            record, _, waiting, _ = task.result()
+            if not waiting and record.status in {
+                RunStatus.succeeded,
+                RunStatus.failed,
+                RunStatus.canceled,
+            }:
+                self._owned_run_ids.discard(run_id)
 
     async def close(self, *, timeout_s: float = 30.0) -> None:
         """Stop admission, cancel owned runs, and join their execution tasks.
@@ -225,7 +234,10 @@ class RunManager:
             await self._admissions_drained.wait()
             pending = tuple(self._background_tasks.items())
             results = await asyncio.gather(
-                *(self.cancel_run(run_id, reason="parent_cancelled") for run_id, _ in pending),
+                *(
+                    self.cancel_run(run_id, reason="parent_cancelled")
+                    for run_id in tuple(self._owned_run_ids)
+                ),
                 return_exceptions=True,
             )
             failures = [result for result in results if isinstance(result, BaseException)]
@@ -234,6 +246,7 @@ class RunManager:
             await asyncio.gather(
                 *(asyncio.shield(task) for _, task in pending), return_exceptions=True
             )
+            self._owned_run_ids.clear()
 
     # -------- concurrency helpers --------
     async def _acquire_run_slot(self) -> None:
@@ -1177,6 +1190,7 @@ class RunManager:
                         await self._release_run_slot()
 
             task = asyncio.create_task(_bg(), name=f"ag-run:{record.run_id}")
+            self._owned_run_ids.add(record.run_id)
             self._background_tasks[record.run_id] = task
             task.add_done_callback(
                 lambda completed: self._background_finished(record.run_id, completed)
