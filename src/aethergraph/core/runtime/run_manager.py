@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 import json
 import logging
+import math
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -320,7 +321,7 @@ class RunManager:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 _log.warning(
-                    "session root-turn barrier timed out; admitting run",
+                    "session root-turn barrier timed out; admission rejected",
                     extra={
                         "session_id": session_id,
                         "graph_id": graph_id,
@@ -329,29 +330,34 @@ class RunManager:
                         "blocked_status": _run_status_text(blocker.status),
                     },
                 )
-                return
+                raise TimeoutError(
+                    f"Session {session_id!r} is still executing root run "
+                    f"{blocker.run_id!r}; retry admission after it settles."
+                )
             await asyncio.sleep(min(_SESSION_ROOT_TURN_BARRIER_POLL_S, remaining))
 
     async def _find_session_root_turn_blocker(self, *, session_id: str) -> RunRecord | None:
         if self._store is None:
             return None
         try:
-            records = await self._store.list(session_id=session_id, limit=25)
+            for status in sorted(_SESSION_ROOT_TURN_BARRIER_STATUSES, key=lambda item: item.value):
+                offset = 0
+                while True:
+                    records = await self._store.list(
+                        session_id=session_id, status=status, limit=100, offset=offset
+                    )
+                    for record in records:
+                        if self._is_session_root_turn_record(record):
+                            return record
+                    if len(records) < 100:
+                        break
+                    offset += len(records)
         except Exception:
             _log.exception(
                 "session root-turn barrier failed to list runs",
                 extra={"session_id": session_id},
             )
-            return None
-        for record in records:
-            status = _run_status(record.status)
-            if status not in _SESSION_ROOT_TURN_BARRIER_STATUSES:
-                continue
-            # Non-root records may legitimately be newer than the prior root
-            # turn in the same session. Keep scanning until we find a visible
-            # root turn that can still be mutating shared session state.
-            if self._is_session_root_turn_record(record):
-                return record
+            raise
         return None
 
     # -------- registry helpers --------
@@ -431,7 +437,7 @@ class RunManager:
             logging.getLogger("aethergraph.runtime.run_manager").exception(
                 "Error persisting durable run outputs for run_id=%s", record.run_id
             )
-            return None
+            raise
 
     async def _recover_outputs_from_snapshot(
         self,
@@ -708,6 +714,13 @@ class RunManager:
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
                 )
+            # Publish success only after durable outputs are readable. Observers
+            # must never see terminal success while result persistence is pending.
+            await self._persist_run_result(
+                record=record,
+                outputs=outputs,
+                source="direct",
+            )
             if self._store is not None:
                 await self._store.update_status(
                     record.run_id,
@@ -716,11 +729,6 @@ class RunManager:
                     error=record.error,
                     meta_update=dict(record.meta),
                 )
-            await self._persist_run_result(
-                record=record,
-                outputs=outputs,
-                source="direct",
-            )
 
         except (asyncio.CancelledError, RunCancellationRequestedError):
             # Cancellation path: scheduler.terminate() or external cancel.
@@ -1396,36 +1404,69 @@ class RunManager:
         timeout_s: float | None = None,
         return_outputs: bool = False,
     ) -> RunRecord | tuple[RunRecord, dict[str, Any] | None]:
+        """Observe a run without transferring cancellation to its shared waiter.
+
+        Reads durable state between bounded waits, so completion in another runtime
+        process and completion racing with waiter registration are both observable.
+
+        Examples:
+            Read completion and its durable outputs:
+                ```python
+                record, output = await manager.wait_run("run-1", return_outputs=True)
+                ```
+
+            Bound only this observer's wait:
+                ```python
+                record = await manager.wait_run("run-1", timeout_s=5)
+                ```
+
+        Args:
+            run_id: Exact run identity visible to this manager.
+            timeout_s: Optional positive observer deadline in seconds.
+            return_outputs: Whether to include the final successful graph outputs.
+
+        Returns:
+            RunRecord | tuple[RunRecord, dict[str, Any] | None]: Terminal record,
+                optionally paired with successful outputs; failed/cancelled runs
+                have no successful output.
+
+        Notes:
+            Observer timeout or cancellation never cancels the run or another
+            observer. Unknown runs raise LookupError; timeout raises TimeoutError.
         """
-        Wait for a run to reach a terminal state.
-
-        - If return_outputs=False (default), returns RunRecord (backwards compatible).
-        - If return_outputs=True, returns (RunRecord, outputs_dict_or_none).
-
-        Output semantics when return_outputs=True:
-        - succeeded: returns durable final graph outputs when available
-          (prefer in-memory completion data, then persisted run results, then
-          snapshot-based recovery as a fallback)
-        - failed / canceled: returns (record, None)
-
-        This keeps wait_run useful across process boundaries instead of limiting
-        output retrieval to only in-process waiters.
-        """
-        # Fast path: already terminal in store
-        rec = await self.get_record(run_id)
-        if rec and rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
-            if return_outputs:
-                if rec.status == RunStatus.succeeded:
-                    return rec, await self._durable_outputs_for_record(rec)
-                return rec, None
-            return rec
-
-        fut = await self._get_or_create_run_future(run_id)
-
-        if timeout_s is not None:
-            result = await asyncio.wait_for(fut, timeout=timeout_s)
-        else:
-            result = await fut
+        if timeout_s is not None and (not math.isfinite(timeout_s) or timeout_s <= 0):
+            raise ValueError("timeout_s must be finite and positive")
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        fut = None
+        while True:
+            rec = await self.get_record(run_id)
+            if rec is None:
+                raise LookupError(f"Run {run_id!r} does not exist")
+            if rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+                if return_outputs:
+                    outputs = (
+                        await self._durable_outputs_for_record(rec)
+                        if rec.status == RunStatus.succeeded
+                        else None
+                    )
+                    return rec, outputs
+                return rec
+            if fut is None:
+                fut = await self._get_or_create_run_future(run_id)
+                # Re-read after registration to close the completion/register race.
+                continue
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"Run {run_id!r} has not completed")
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(fut),
+                    timeout=0.5 if remaining is None else min(0.5, remaining),
+                )
+                break
+            except TimeoutError:
+                continue
 
         # result is either:
         # - RunRecord (old-style resolvers)
