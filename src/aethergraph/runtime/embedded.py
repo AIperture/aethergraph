@@ -144,6 +144,7 @@ class EmbeddedRuntime:
         self._integration: RuntimeIntegration | None = None
         self._graphs_loaded = False
         self._timer_started = False
+        self._triggers_started = False
         self._readiness_lock = asyncio.Lock()
         self._ready = False
         self._closed = False
@@ -1259,6 +1260,9 @@ class EmbeddedRuntime:
             if self._timer_started:
                 await self._container.continuation_timer.stop()
                 self._timer_started = False
+            if self._triggers_started:
+                await self._container.trigger_engine.stop()
+                self._triggers_started = False
             if self._container.run_manager is not None:
                 await self._container.run_manager.close()
             failures: list[str] = []
@@ -1285,7 +1289,9 @@ class EmbeddedRuntime:
 
     async def _ensure_ready(self) -> None:
         self._ensure_open()
-        if self._ready and (self._timer_started or not self._graphs_loaded):
+        if self._ready and (
+            (self._timer_started and self._triggers_started) or not self._graphs_loaded
+        ):
             return
         async with self._readiness_lock:
             self._ensure_open()
@@ -1298,6 +1304,10 @@ class EmbeddedRuntime:
                 with self.activate():
                     await self._container.continuation_timer.start()
                 self._timer_started = True
+            if self._graphs_loaded and not self._triggers_started:
+                with self.activate():
+                    await self._container.trigger_engine.start()
+                self._triggers_started = True
 
     def _require_run_manager(self) -> Any:
         self._ensure_open()

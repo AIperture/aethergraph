@@ -76,7 +76,7 @@ class TriggerFacade:
 
     Notes:
         The facade does not run polling loops itself; scheduled execution is
-        handled by `TriggerEngine.run_forever(...)` elsewhere in runtime wiring.
+        handled by the lifespan-owned `TriggerEngine.start()` task in runtime wiring.
     """
 
     trigger_service: TriggerService

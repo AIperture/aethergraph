@@ -95,7 +95,7 @@ def create_app(
         app.state.container = container
         app.state.integration_manager = integration_manager
 
-        trigger_engine_task = None
+        trigger_engine_started = False
         retention_stop = asyncio.Event()
         retention_task = None
         integration_started = False
@@ -111,8 +111,8 @@ def create_app(
 
             if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
                 trigger_engine: TriggerEngine = container.trigger_engine
-                trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
-                app.state.trigger_engine_task = trigger_engine_task
+                await trigger_engine.start()
+                trigger_engine_started = True
                 logger.info("TriggerEngine background task started")
 
             if integration_manager is not None:
@@ -167,26 +167,23 @@ def create_app(
             # Hand control back to FastAPI / TestClient
             yield
         finally:
+            background_services_stopped = True
             # --- Shutdown: best-effort cleanup of background tasks ---
             # 1) Stop continuation delivery before other runtime services.
             try:
                 await container.continuation_timer.stop()
             except Exception:
+                background_services_stopped = False
                 logger.exception("Error stopping ContinuationTimerService")
 
             # 2) Stop TriggerEngine gracefully
-            if trigger_engine_task is not None:
+            if trigger_engine_started:
                 trigger_engine: TriggerEngine = container.trigger_engine
                 try:
                     await trigger_engine.stop()
                 except Exception:
+                    background_services_stopped = False
                     logger.exception("Error stopping TriggerEngine")
-
-                if not trigger_engine_task.done():
-                    # In case it's still waiting on the poll sleep
-                    trigger_engine_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await trigger_engine_task
 
             # 3) Stop explicitly configured provider transports
             if integration_manager is not None and integration_started:
@@ -203,6 +200,10 @@ def create_app(
             try:
                 if container.run_manager is not None:
                     await container.run_manager.close()
+                if not background_services_stopped:
+                    raise RuntimeError(
+                        "Background service shutdown is incomplete; storage remains open"
+                    )
                 await container.close_storage()
             except Exception:
                 logger.exception("Error closing canonical storage")
