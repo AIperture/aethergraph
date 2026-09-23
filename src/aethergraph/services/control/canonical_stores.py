@@ -455,7 +455,7 @@ class CanonicalRunResultStore(RunResultStore):
         record = await self._repository.get(
             _operation_scope(self._owner_scope, run_id=run_id), run_id
         )
-        return _result_to_service(record) if record is not None else None
+        return project_canonical_run_result(record) if record is not None else None
 
     async def delete(self, run_id: str) -> None:
         """Delete one current result through exact provider revision CAS.
@@ -1045,7 +1045,29 @@ def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
     )
 
 
-def _result_to_service(record: CanonicalRunResultRecord) -> RunResult:
+def project_canonical_run_result(record: CanonicalRunResultRecord) -> RunResult:
+    """Project frozen provider output into one detached runtime result.
+
+    Intro:
+        Live and historical readers share recursive JSON conversion without
+        exposing provider-owned immutable containers.
+
+    Examples:
+        Project an authorized result:
+            ```python
+            result = project_canonical_run_result(record)
+            ```
+        Serialize its ordinary JSON output:
+            ```python
+            encoded = json.dumps(result.outputs)
+            ```
+    Args:
+        record: Canonical result already authorized by its repository query.
+    Returns:
+        RunResult: Detached metadata and recursively converted graph output.
+    Notes:
+        This performs no storage writes or result acknowledgement.
+    """
     outputs = _plain(record.outputs)
     if not isinstance(outputs, dict):
         raise ValueError("Canonical run result outputs must be an object")

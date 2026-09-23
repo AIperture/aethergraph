@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,10 @@ async def test_retained_run_output_survives_close_and_enforces_reader_identity(t
             if allowed:
                 run = await reader.get_run("control")
                 assert run["result_available"] is True
+                assert await reader.get_run_output("control") == output
+                detached = await reader.get_run_output("control")
+                assert json.loads(json.dumps(detached)) == output
+                detached["result"]["data"]["control"]["acknowledged"] = False
                 assert await reader.get_run_output("control") == output
         finally:
             await reader.close()

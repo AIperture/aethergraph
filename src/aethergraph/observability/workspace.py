@@ -27,7 +27,10 @@ from aethergraph.observability.prompt_store import content_hash
 from aethergraph.server.security.redaction import canonical_json
 from aethergraph.services.canonical_storage_scope import merge_storage_scope
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.control.canonical_stores import project_canonical_run_record
+from aethergraph.services.control.canonical_stores import (
+    project_canonical_run_record,
+    project_canonical_run_result,
+)
 from aethergraph.storage.composition import StorageComposition
 from aethergraph.storage.contracts import (
     EventQuery,
@@ -558,9 +561,7 @@ class _CanonicalObservabilityFacade:
         result = await bundle.run_results.get(scope, run_id)
         if result is None:
             return None
-        if not isinstance(result.outputs, Mapping):
-            raise ObservabilityUnavailableError("Retained run output is not an object")
-        return dict(result.outputs)
+        return project_canonical_run_result(result).outputs
 
     async def list_engine_events(self, *, run_id: str) -> list[dict[str, Any]]:
         """List canonical Engine events for one run in causal storage order.
