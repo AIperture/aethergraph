@@ -772,10 +772,12 @@ async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_succes
 
 
 @pytest.mark.asyncio
-async def test_success_status_is_durable_before_result_save(
+@pytest.mark.parametrize("fail_result_save", [False, True])
+async def test_result_persistence_precedes_success_and_failures_remain_visible(
     monkeypatch,
     dummy_meter,
     tmp_path,
+    fail_result_save,
 ):
     store = RunStoreFake()
 
@@ -786,9 +788,11 @@ async def test_success_status_is_durable_before_result_save(
             durable = await store.get(run_id)
             self.observed_status = durable.status if durable is not None else None
             assert durable is not None
-            assert durable.status == RunStatus.succeeded
-            assert durable.finished_at is not None
-            assert "output_preview" in durable.meta
+            assert durable.status == RunStatus.running
+            assert durable.finished_at is None
+            assert not durable.result_available
+            if fail_result_save:
+                raise OSError("Result store unavailable")
             await super().save(run_id, result)
 
     result_store = OrderingResultStore()
@@ -820,9 +824,16 @@ async def test_success_status_is_durable_before_result_save(
         identity=Identity(user_id="u1", org_id="o1"),
     )
     waited, outputs = await manager.wait_run(record.run_id, return_outputs=True)
-    assert waited.status == RunStatus.succeeded
-    assert outputs == {"out": 42}
-    assert result_store.observed_status == RunStatus.succeeded
+    assert result_store.observed_status == RunStatus.running
+    if fail_result_save:
+        assert waited.status == RunStatus.failed
+        assert not waited.result_available
+        assert outputs is None
+        assert "Result store unavailable" in waited.error
+    else:
+        assert waited.status == RunStatus.succeeded
+        assert waited.result_available
+        assert outputs == {"out": 42}
 
 
 @pytest.mark.asyncio
