@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.engine import TriggerEngine
@@ -70,6 +71,7 @@ class TriggerFacade:
         trigger_service: Service used to create, cancel, and fetch trigger records.
         trigger_engine: Engine used to fan out and execute event-based triggers.
         scope: Bound runtime scope used for tenant-aware trigger creation/firing.
+        origin_binding: Immutable originating channel route inherited by scheduled runs.
 
     Returns:
         TriggerFacade: Dataclass wrapper exposing node-friendly trigger methods.
@@ -82,6 +84,7 @@ class TriggerFacade:
     trigger_service: TriggerService
     trigger_engine: TriggerEngine
     scope: Scope
+    origin_binding: OriginBinding | None = None
 
     # ------------ low-level: generic trigger management, mostly delegating to TriggerService --------------
     async def create(
@@ -153,6 +156,7 @@ class TriggerFacade:
             origin="schedule" if config.kind != "event" else "event",
             trigger_name=trigger_name,
             idempotency_key=idempotency_key,
+            origin_binding=self.origin_binding,
         )
 
     # ------------ higher-level: event triggers with convenient defaults --------------

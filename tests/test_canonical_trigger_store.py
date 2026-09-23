@@ -407,3 +407,61 @@ def test_canonical_trigger_public_docstrings_follow_strict_contract() -> None:
             docstring.index(section) for section in ("Examples:", "Args:", "Returns:", "Notes:")
         ]
         assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_trigger_origin_survives_reopen_and_exact_creation_replay(tmp_path: Path) -> None:
+    from aethergraph.contracts.integration import OriginBinding
+    from aethergraph.services.triggers.engine import TriggerEngine
+    from aethergraph.services.triggers.trigger_facade import TriggerConfig, TriggerFacade
+    from tests.test_triggers import FakeRunManager
+
+    origin = OriginBinding(
+        integration_id="studio",
+        route_id="session-chat",
+        session_id="session-1",
+        channel_key="ui:session:session-1",
+        external_conversation_id="session-1",
+        capability_profile_id="chat/v1",
+    )
+    scope = Scope(org_id="org-1", user_id="user-1", session_id="session-1", agent_id="agent-1")
+    store, _, database, _ = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    request = dict(
+        graph_id="wake",
+        default_inputs={"invocation_id": "inv-1"},
+        config=TriggerConfig(kind="interval", interval_seconds=10, catch_up_missed=True),
+        idempotency_key="origin-test",
+    )
+    facade = TriggerFacade(
+        trigger_service=service, trigger_engine=None, scope=scope, origin_binding=origin
+    )
+    created = await facade.create(**request)
+    assert TriggerRecord.from_dict(created.to_dict()).origin_binding == origin
+    await database.close()
+
+    store, _, database, _ = _store(tmp_path)
+    try:
+        service = TriggerServiceImpl(store=store)
+        facade = replace(facade, trigger_service=service, scope=replace(scope, run_id="later-run"))
+        replay = await facade.create(**request)
+        assert replay.trigger_id == created.trigger_id
+        assert replay.origin_binding == origin
+        restored = await store.get(created.trigger_id)
+        assert restored.origin_binding == origin
+        manager = FakeRunManager()
+        engine = TriggerEngine(store=store, run_manager=manager)
+        await engine._submit(
+            restored, inputs=restored.default_inputs, run_id="wake-run", fire_id="fire-1"
+        )
+        assert manager.calls[0]["run_config"] == {"origin_binding": origin.model_dump(mode="json")}
+        with pytest.raises(StorageConflictError, match="different request"):
+            await replace(
+                facade, origin_binding=origin.model_copy(update={"route_id": "other-route"})
+            ).create(**request)
+        with pytest.raises(ValueError, match="must match its session"):
+            await replace(
+                facade, origin_binding=origin.model_copy(update={"session_id": "other-session"})
+            ).create(**request)
+    finally:
+        await database.close()

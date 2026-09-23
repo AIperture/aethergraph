@@ -725,6 +725,9 @@ def _to_canonical(
             "client_id": trig.client_id,
             "mode": trig.mode,
             "memory_level": trig.memory_level,
+            "origin_binding": None
+            if trig.origin_binding is None
+            else trig.origin_binding.model_dump(mode="json"),
         }.items()
         if value is not None
     }
@@ -788,6 +791,7 @@ def _to_legacy(record: CanonicalTriggerRecord) -> TriggerRecord:
         agent_id=record.scope.agent_id,
         session_id=record.scope.session_id,
         memory_level=service.get("memory_level"),
+        origin_binding=service.get("origin_binding"),
         graph_id=record.graph_id,
         default_inputs=_plain(record.default_inputs),
         origin=record.origin,

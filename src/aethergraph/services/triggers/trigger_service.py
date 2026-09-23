@@ -7,6 +7,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
 from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.observability.canonical_service import CanonicalObservationService
@@ -44,6 +45,7 @@ class TriggerServiceImpl(TriggerService):
         trigger_name: str | None = None,
         meta: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        origin_binding: OriginBinding | None = None,
     ) -> TriggerRecord:
         """Create one validated trigger or recover its exact prior creation receipt.
 
@@ -81,6 +83,7 @@ class TriggerServiceImpl(TriggerService):
             origin: Run origin attached to scheduled execution.
             trigger_name: Optional display label.
             meta: Caller metadata, excluding service-owned creation evidence.
+            origin_binding: Optional immutable channel route for scheduled runs in this session.
             idempotency_key: Optional 1..512 character identity within the owning scope.
 
         Returns:
@@ -128,6 +131,7 @@ class TriggerServiceImpl(TriggerService):
             default_inputs=default_inputs,
             kind=kind,
             origin=origin,
+            origin_binding=origin_binding,
             cron_expr=cron_expr,
             interval_seconds=interval_seconds,
             run_at=run_at,
@@ -140,6 +144,8 @@ class TriggerServiceImpl(TriggerService):
         )
         if idempotency_key is not None:
             request = trig.to_dict()
+            if request.get("origin_binding") is None:
+                request.pop("origin_binding", None)
             for field in ("created_at", "active", "last_fired_at", "next_fire_at"):
                 request.pop(field)
             digest = sha256(

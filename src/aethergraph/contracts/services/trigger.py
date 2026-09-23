@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Protocol
 
+from aethergraph.contracts.integration import OriginBinding
+
 TriggerKind = Literal["cron", "interval", "one_shot", "event"]
 
 
@@ -25,6 +27,7 @@ class TriggerService(Protocol):
         trigger_name: str | None = None,
         meta: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        origin_binding: OriginBinding | None = None,
     ) -> Any: ...  # should return TriggerRecord, but we avoid importing it here to keep this protocol decoupled from the data layer
 
     async def cancel(

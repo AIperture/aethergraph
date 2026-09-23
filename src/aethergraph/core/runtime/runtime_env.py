@@ -41,8 +41,6 @@ def _canonical_scope(scope: Any) -> StorageScope:
     )
 
 
-
-
 @dataclass
 class RuntimeEnv:
     """Unified runtime env that is built from DefaultContainer and can spawn NodeContexts."""
@@ -201,6 +199,7 @@ class RuntimeEnv:
             trigger_service=self.container.trigger_service,
             trigger_engine=self.container.trigger_engine,
             scope=trigger_scope,
+            origin_binding=self.origin_binding,
         )
 
         runner = RunFacade(

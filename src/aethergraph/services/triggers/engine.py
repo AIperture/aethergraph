@@ -307,6 +307,11 @@ class TriggerEngine:
             session_id=trig.session_id,
             identity=identity,
             origin=RunOrigin.schedule,
+            run_config=(
+                {"origin_binding": trig.origin_binding.model_dump(mode="json")}
+                if trig.origin_binding is not None
+                else None
+            ),
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
             agent_id=trig.agent_id,
