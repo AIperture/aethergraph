@@ -23,7 +23,7 @@ def _write_build(parent: Path) -> Path:
     generated.parent.mkdir(parents=True)
     generated.write_text("VALUE = 1\n", encoding="utf-8")
     resolved = {
-        "schema_version": "aethergraph.resolved-system/v13",
+        "schema_version": "aethergraph.resolved-system/v14",
         "semantic_event_protocol_version": SEMANTIC_EVENT_PROTOCOL_VERSION,
         "logical_output_requirements": ["origin"],
         "source_digest": "a" * 64,
@@ -48,11 +48,13 @@ def _write_build(parent: Path) -> Path:
             }
         )
     manifest = {
-        "schema_version": "aethergraph.compiled-system-manifest/v16",
+        "schema_version": "aethergraph.compiled-system-manifest/v17",
         "build_id": build_id,
         "package_name": "demo_compiled",
         "entrypoint_module": "demo_compiled.entry",
         "entrypoint_symbol": "demo_entry",
+        "control_entrypoint_symbol": "demo_entry_control",
+        "control_graph_id": "demo.graph.control",
         "source_digest": "a" * 64,
         "engine_version": "0.1.0a1",
         "compiler_version": "30",
@@ -73,6 +75,25 @@ def _write_build(parent: Path) -> Path:
     }
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root
+
+
+@pytest.mark.parametrize("change", ["old_manifest", "missing_control", "old_resolved"])
+def test_inspect_compiled_build_rejects_superseded_control_contract(tmp_path, change):
+    root = _write_build(tmp_path)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if change == "old_manifest":
+        manifest["schema_version"] = "aethergraph.compiled-system-manifest/v16"
+    elif change == "missing_control":
+        del manifest["control_graph_id"]
+    else:
+        resolved_path = root / "resolved-system.json"
+        resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+        resolved["schema_version"] = "aethergraph.resolved-system/v13"
+        resolved_path.write_text(json.dumps(resolved), encoding="utf-8")
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(CompiledBuildError, match="Invalid compiled build"):
+        inspect_compiled_build(root)
 
 
 def test_inspect_compiled_build_without_engine_package(tmp_path) -> None:
