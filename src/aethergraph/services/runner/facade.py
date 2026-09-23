@@ -121,7 +121,7 @@ class RunFacade:
         """Read current run metadata without waiting or affecting execution.
 
         Reads the canonical run store and restricts the result to this facade's
-        session or a direct child owned by that session, within the same tenant.
+        session or a descendant owned by that session, within the same tenant.
         Missing and out-of-scope identities both fail lookup.
 
         Examples:
@@ -149,20 +149,35 @@ class RunFacade:
             Parent ownership comes from retained admission metadata, never tags,
             input previews, or a matching graph name. Later turns in the parent
             session retain the same authority after the initiating run completes.
+            Nested ownership traverses exact parent run IDs, rejects cycles and
+            missing records, and checks the same tenant at each intermediate run.
         """
         if not run_id:
             raise ValueError("Run inspection requires an exact run identity")
         record = await self.run_manager.get_record(run_id)
-        if record is None or (
-            self.session_id is not None
-            and record.session_id != self.session_id
-            and (record.parent is None or record.parent.session_id != self.session_id)
-        ):
+        if record is None:
             raise LookupError("Run does not exist in the caller scope")
         if self.identity is not None and (
             record.org_id != self.identity.org_id or record.user_id != self.identity.user_id
         ):
             raise LookupError("Run does not exist in the caller scope")
+        ancestor = record
+        visited = {record.run_id}
+        while self.session_id is not None and ancestor.session_id != self.session_id:
+            parent = ancestor.parent
+            if parent is None or parent.run_id in visited:
+                raise LookupError("Run does not exist in the caller scope")
+            if parent.session_id == self.session_id:
+                break
+            visited.add(parent.run_id)
+            ancestor = await self.run_manager.get_record(parent.run_id)
+            if (
+                ancestor is None
+                or ancestor.session_id != parent.session_id
+                or ancestor.org_id != record.org_id
+                or ancestor.user_id != record.user_id
+            ):
+                raise LookupError("Run does not exist in the caller scope")
         return record
 
     async def spawn_run(

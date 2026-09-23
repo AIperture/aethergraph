@@ -104,7 +104,10 @@ def install_integration_ingress(
         idempotency_store=persistence.idempotency,
         session_store=persistence.sessions,
         resource_ingress=ResourceIngress(container=container, policy=resource_policy),
-        interaction_resolver=InteractionResolver(container.cont_store),
+        interaction_resolver=InteractionResolver(
+            container.cont_store,
+            run_manager=container.run_manager,
+        ),
         inbound_events=persistence.inbound_events,
         semantic_emitter=emitter,
         resume_router=container.resume_router,

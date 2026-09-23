@@ -1,6 +1,10 @@
 """Direct graph callers retain their exact storage scope in managed child runs."""
 
 import asyncio
+from dataclasses import replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -9,10 +13,16 @@ from aethergraph import NodeContext
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.config.config import AppSettings
 from aethergraph.core.graph.graph_fn import GraphFunction
+from aethergraph.core.runtime.run_types import RunParent, RunRecord, RunStatus
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.runner import run_async
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.continuations.continuation import ContinuationQuery, Correlator
+from aethergraph.services.integration.interactions import (
+    InteractionResolutionError,
+    InteractionResolver,
+)
 from aethergraph.services.runner.facade import RunFacade
 
 
@@ -158,3 +168,156 @@ async def test_isolated_child_is_owned_by_parent_session_after_run_completion(tm
         finally:
             await container.run_manager.close()
             await container.close_storage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [1, 2])
+async def test_parent_answers_live_isolated_child_after_parent_run_finishes(tmp_path, depth):
+    container = build_default_container(
+        cfg=AppSettings(workspace=str(tmp_path), embed={"enabled": False}), root=str(tmp_path)
+    )
+    questions = asyncio.Queue()
+    executions = []
+
+    class Questions:
+        capabilities = {"text", "input"}
+
+        async def send(self, event):
+            if event.type == "session.need_input":
+                questions.put_nowait(event)
+            return {"correlator": Correlator("test", event.channel, "", "question")}
+
+    container.channels.register_adapter("test", Questions())
+
+    async def child(*, context: NodeContext):
+        executions.append(context.run_id)
+        answer = await context.channel("test:parent").ask_text("Which material?")
+        return {"answer": answer}
+
+    child_graph = GraphFunction(
+        name=f"test.child_question.{uuid4().hex}", fn=child, inputs=[], outputs=["answer"]
+    )
+
+    async def relay(*, context: NodeContext):
+        run_id = await context.runner().spawn_run(
+            child_graph.name, inputs={}, session_id="isolated-grandchild"
+        )
+        _, output = await context.runner().wait_run(run_id, return_outputs=True)
+        return output
+
+    relay_graph = GraphFunction(
+        name=f"test.relay_question.{uuid4().hex}", fn=relay, inputs=[], outputs=["answer"]
+    )
+
+    async def parent(*, context: NodeContext):
+        child_run = await context.runner().spawn_run(
+            child_graph.name if depth == 1 else relay_graph.name,
+            inputs={},
+            session_id="isolated-child",
+        )
+        return {"child_run": child_run}
+
+    parent_graph = GraphFunction(
+        name=f"test.parent_question.{uuid4().hex}", fn=parent, inputs=[], outputs=["child_run"]
+    )
+    with use_services(container):
+        try:
+            for graph in (child_graph, relay_graph):
+                current_registry().register(
+                    nspace="graphfn",
+                    name=graph.name,
+                    version=graph.version,
+                    obj=graph,
+                )
+            result = await asyncio.wait_for(
+                run_async(parent_graph, {}, session_id="parent-session"), 10
+            )
+            question = await asyncio.wait_for(questions.get(), 10)
+            expected_session = "isolated-child" if depth == 1 else "isolated-grandchild"
+            assert question.meta["session_id"] == expected_session
+
+            # This case isolates ownership after delivery registration completes.
+            # Immediate response racing correlator binding is qualified separately.
+            async def delivery_registered():
+                while True:
+                    page = await container.cont_store.query(
+                        ContinuationQuery(
+                            correlator=Correlator(
+                                "interaction", "public", message=question.meta["interaction_id"]
+                            ),
+                            limit=1,
+                        )
+                    )
+                    if page.items and len(page.items[0].correlators) == 3:
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(delivery_registered(), 10)
+            resolver = InteractionResolver(container.cont_store, run_manager=container.run_manager)
+            with pytest.raises(InteractionResolutionError, match="bound AG session"):
+                await resolver.resolve_exact(
+                    session_id="unrelated-session",
+                    interaction_id=question.meta["interaction_id"],
+                    expected_kinds={"user_input"},
+                )
+            resolved = await resolver.resolve_exact(
+                session_id="parent-session",
+                interaction_id=question.meta["interaction_id"],
+                expected_kinds={"user_input"},
+            )
+            await container.resume_router.resume_continuation(
+                resolved.continuation,
+                {"text": "Titanium"},
+            )
+            record, output = await asyncio.wait_for(
+                RunFacade(container.run_manager, session_id="parent-session").wait_run(
+                    result["child_run"],
+                    return_outputs=True,
+                ),
+                10,
+            )
+            assert record.status.value == "succeeded", record.error
+            assert output == {"answer": "Titanium"}
+            assert executions == [question.meta["run_id"]]
+        finally:
+            await container.run_manager.close()
+            await container.close_storage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "missing", "cycle", "org", "user", "session"])
+async def test_nested_run_authority_requires_intact_same_tenant_lineage(fault):
+    leaf = RunRecord(
+        run_id="leaf",
+        graph_id="graph",
+        kind="graphfn",
+        status=RunStatus.running,
+        started_at=datetime.now(UTC),
+        session_id="leaf-session",
+        org_id="org",
+        user_id="user",
+        parent=RunParent(run_id="relay", session_id="relay-session"),
+    )
+    relay = replace(
+        leaf,
+        run_id="relay",
+        session_id="relay-session",
+        status=RunStatus.succeeded,
+        parent=RunParent(run_id="root", session_id="root-session"),
+    )
+    if fault == "cycle":
+        relay = replace(relay, parent=RunParent(run_id="leaf", session_id="leaf-session"))
+    elif fault in {"org", "user", "session"}:
+        relay = replace(relay, **{f"{fault}_id": "unrelated"})
+    records = {"leaf": leaf, "relay": relay}
+    if fault == "missing":
+        del records["relay"]
+    manager = SimpleNamespace(get_record=AsyncMock(side_effect=records.get))
+    facade = RunFacade(
+        manager, session_id="root-session", identity=RequestIdentity(org_id="org", user_id="user")
+    )
+    if fault is None:
+        assert await facade.inspect_run("leaf") == leaf
+    else:
+        with pytest.raises(LookupError, match="caller scope"):
+            await facade.inspect_run("leaf")

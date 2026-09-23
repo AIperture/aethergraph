@@ -14,6 +14,7 @@ from aethergraph.services.continuations.continuation import (
     ContinuationQuery,
     Correlator,
 )
+from aethergraph.services.runner.facade import RunFacade
 
 
 class InteractionResolutionError(RuntimeError):
@@ -76,7 +77,7 @@ class ResolvedInteraction:
 class InteractionResolver:
     """Resolve exact callbacks or one eligible bound-session free-text wait."""
 
-    def __init__(self, continuation_store) -> None:
+    def __init__(self, continuation_store, *, run_manager=None) -> None:
         """Bind resolution to the Host continuation store.
 
         The resolver reads open continuation records but never uses correlator,
@@ -85,7 +86,7 @@ class InteractionResolver:
         Examples:
             Create a resolver:
             ```python
-            resolver = InteractionResolver(container.cont_store)
+            resolver = InteractionResolver(container.cont_store, run_manager=container.run_manager)
             ```
 
             Resolve during coordinator acceptance:
@@ -95,14 +96,19 @@ class InteractionResolver:
 
         Args:
             continuation_store: Store exposing the bounded continuation query contract.
+            run_manager: Canonical run owner for resolving descendant interactions.
+                Without it only the exact bound session can be resolved.
 
         Returns:
             None.
 
         Notes:
             Continuations bind public interaction IDs as exact indexed correlators.
+            Descendant authority is checked by the run facade using retained
+            submission lineage; channel addresses never grant session access.
         """
         self.store = continuation_store
+        self.run_manager = run_manager
 
     async def resolve(
         self,
@@ -209,7 +215,7 @@ class InteractionResolver:
                 ```
 
         Args:
-            session_id: Exact AG session that owns the interaction.
+            session_id: Exact AG session that owns the interaction or its submitting ancestor.
             interaction_id: Public interaction identity emitted by Channel.
             expected_kinds: Continuation kinds accepted by the response.
         Returns:
@@ -218,6 +224,8 @@ class InteractionResolver:
         Notes:
             Continuation tokens remain private. Resolution never guesses by newest
             wait, Channel prefix, or correlator.
+            Descendant questions require an explicit interaction identity. Ordinary
+            free text only considers waits owned directly by the bound session.
         """
 
         correlator = Correlator(
@@ -247,7 +255,18 @@ class InteractionResolver:
                 message="The supplied interaction identity is not unique.",
             )
         wait = exact[0]
-        if wait.session_id != session_id:
+        owned = wait.session_id == session_id
+        if not owned and self.run_manager is not None:
+            try:
+                record = await RunFacade(
+                    self.run_manager,
+                    session_id=session_id,
+                ).inspect_run(wait.run_id)
+            except LookupError:
+                owned = False
+            else:
+                owned = record.session_id == wait.session_id
+        if not owned:
             raise InteractionResolutionError(
                 code="integration.interaction_session_mismatch",
                 message="The interaction does not belong to the bound AG session.",

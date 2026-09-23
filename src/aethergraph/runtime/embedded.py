@@ -659,7 +659,10 @@ class EmbeddedRuntime:
         if response_kind not in {"text", "choice"}:
             raise ValueError(f"Unsupported interaction response kind: {response_kind}")
         try:
-            resolved = await InteractionResolver(self._container.cont_store).resolve_exact(
+            resolved = await InteractionResolver(
+                self._container.cont_store,
+                run_manager=self._container.run_manager,
+            ).resolve_exact(
                 session_id=session_id,
                 interaction_id=interaction_id,
                 expected_kinds=expected_kinds,
