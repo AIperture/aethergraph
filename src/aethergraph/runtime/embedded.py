@@ -150,8 +150,8 @@ class EmbeddedRuntime:
         self._closed = False
         self._closing = False
 
-    async def start(self) -> None:
-        """Establish storage readiness before publishing this runtime to callers.
+    async def start(self, *, graph_ids: Sequence[str] = ()) -> None:
+        """Establish storage and registered-graph scheduling before Host publication.
 
         The explicit barrier runs the same idempotent readiness path used by every
         runtime operation, allowing an embedding Host to keep a failed runtime private.
@@ -163,23 +163,34 @@ class EmbeddedRuntime:
             await runtime.start()
             ```
 
-            Reuse established readiness:
+            Start scheduling for graphs registered by an installed package:
             ```python
-            await runtime.start()
-            await runtime.start()
+            await runtime.start(graph_ids=("installed_agent",))
+            await runtime.start(graph_ids=("installed_agent",))
             ```
 
         Args:
-            None.
+            graph_ids: Already registered graphs required by this Host. Every identity
+                is validated before enabling scheduler recovery. Graphs loaded through
+                `load_graph` already establish registration readiness.
 
         Returns:
-            None: The selected storage composition is ready.
+            None: Storage is ready and registered-graph schedulers have started.
 
         Notes:
             Startup failure remains terminal for this runtime instance. The embedding
             Host may close it and construct a fresh instance from its owned request.
         """
 
+        self._ensure_open()
+        if graph_ids:
+            snapshot = self.registration_snapshot(agent_ids=(), graph_ids=graph_ids)
+            missing = set(graph_ids) - snapshot.registered_graph_ids
+            if missing:
+                raise RuntimeGraphLoadError(
+                    f"Cannot start scheduling with unregistered graphs: {sorted(missing)!r}."
+                )
+            self._graphs_loaded = True
         await self._ensure_ready()
 
     @property

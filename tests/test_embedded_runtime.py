@@ -20,6 +20,9 @@ class _RunManager:
     def __init__(self) -> None:
         self.submitted = None
 
+    async def close(self):
+        return None
+
     async def submit_run(self, graph_id, **kwargs):
         self.submitted = (graph_id, kwargs)
         return RunRecord(
@@ -179,6 +182,47 @@ async def test_explicit_start_establishes_runtime_readiness_once() -> None:
     await runtime.start()
 
     assert starts == 1
+
+
+@pytest.mark.asyncio
+async def test_installed_graph_start_enables_schedulers_before_first_submission():
+    lifecycle = []
+
+    class Scheduler:
+        def __init__(self, name):
+            self.name = name
+
+        async def start(self):
+            lifecycle.append((self.name, "start"))
+
+        async def stop(self):
+            lifecycle.append((self.name, "stop"))
+
+    runtime = EmbeddedRuntime(
+        _container(
+            registry=SimpleNamespace(get_graphfn=lambda name: object()),
+            continuation_timer=Scheduler("continuations"),
+            trigger_engine=Scheduler("triggers"),
+        )
+    )
+    await runtime.start()
+    assert lifecycle == []
+    await runtime.start(graph_ids=("installed_agent",))
+    await runtime.start(graph_ids=("installed_agent",))
+    assert lifecycle == [("continuations", "start"), ("triggers", "start")]
+    await runtime.close()
+    assert lifecycle[-2:] == [("continuations", "stop"), ("triggers", "stop")]
+
+
+@pytest.mark.asyncio
+async def test_missing_installed_graph_does_not_enable_scheduler_recovery():
+    from aethergraph.runtime.errors import RuntimeGraphLoadError
+
+    runtime = EmbeddedRuntime(_container(registry=SimpleNamespace(get_graphfn=lambda name: None)))
+    with pytest.raises(RuntimeGraphLoadError, match="unregistered graphs"):
+        await runtime.start(graph_ids=("missing",))
+    assert runtime._graphs_loaded is False
+    assert runtime._ready is False
 
 
 @pytest.mark.asyncio
