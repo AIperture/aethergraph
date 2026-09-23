@@ -143,10 +143,19 @@ class ResumeRouter:
                     },
                 )
                 raise
-            self.waits.resolve(wait_id, full_payload)
-            self.logger.info(
-                "Resolved cooperative wait for %s/%s", continuation.run_id, continuation.node_id
-            )
+            scheduled = self.waits.resolve(wait_id, full_payload, cache_if_missing=False)
+            if scheduled:
+                self.logger.info(
+                    "Scheduled cooperative response for %s/%s",
+                    current.run_id,
+                    current.node_id,
+                )
+            else:
+                self.logger.info(
+                    "Retained committed response after its waiter ended for %s/%s",
+                    current.run_id,
+                    current.node_id,
+                )
             return
 
         await self.runner.enqueue_resume(continuation=continuation, payload=full_payload)

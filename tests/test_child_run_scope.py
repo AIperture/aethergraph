@@ -353,3 +353,112 @@ async def test_nested_run_authority_requires_intact_same_tenant_lineage(fault):
     else:
         with pytest.raises(LookupError, match="caller scope"):
             await facade.inspect_run("leaf")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination", ["cancel", "delivery_failure", "cleanup_failure"])
+async def test_stopped_child_closes_its_question_without_stopping_sibling(
+    tmp_path, termination, monkeypatch, capfd
+):
+    container = build_default_container(
+        cfg=AppSettings(workspace=str(tmp_path), embed={"enabled": False}), root=str(tmp_path)
+    )
+    questions = asyncio.Queue()
+    sibling_release = asyncio.Event()
+    executions = []
+
+    class Adapter:
+        capabilities = {"text", "input"}
+
+        async def send(self, event):
+            questions.put_nowait(event)
+            if termination in {"delivery_failure", "cleanup_failure"}:
+                raise RuntimeError("question delivery failed")
+            return {}
+
+    container.channels.register_adapter("test", Adapter())
+    if termination == "cleanup_failure":
+        monkeypatch.setattr(
+            container.cont_store, "close", AsyncMock(side_effect=OSError("storage unavailable"))
+        )
+
+    async def child(question, *, context: NodeContext):
+        executions.append(context.run_id)
+        if question:
+            value = await context.channel("test:question").ask_text("Material?")
+        else:
+            await sibling_release.wait()
+            value = "sibling completed"
+        return {"value": value}
+
+    child_graph = GraphFunction(
+        name=f"test.stopped_question.{uuid4().hex}",
+        fn=child,
+        inputs=["question"],
+        outputs=["value"],
+    )
+
+    async def parent(*, context: NodeContext):
+        ids = [
+            await context.runner().spawn_run(
+                child_graph.name,
+                inputs={"question": question},
+                session_id=f"child-{question}",
+            )
+            for question in (True, False)
+        ]
+        return {"ids": ids}
+
+    with use_services(container):
+        try:
+            current_registry().register(
+                nspace="graphfn",
+                name=child_graph.name,
+                version=child_graph.version,
+                obj=child_graph,
+            )
+            result = await run_async(
+                GraphFunction(
+                    name=f"test.stop_parent.{uuid4().hex}", fn=parent, inputs=[], outputs=["ids"]
+                ),
+                {},
+                session_id="parent",
+            )
+            event = await asyncio.wait_for(questions.get(), 10)
+            facade = RunFacade(container.run_manager, session_id="parent")
+            child_id, sibling_id = result["ids"]
+            if termination == "cancel":
+                await facade.cancel_run(child_id)
+            stopped = await asyncio.wait_for(facade.wait_run(child_id), 10)
+            assert stopped.status.value == ("canceled" if termination == "cancel" else "failed")
+            retained = await container.cont_store.get(event.meta["run_id"], event.meta["node_id"])
+            if termination == "cleanup_failure":
+                assert retained.status is ContinuationStatus.WAITING
+                assert "Failed to close interrupted interaction" in capfd.readouterr().err
+                assert "question delivery failed" in stopped.error
+            else:
+                assert retained.status is ContinuationStatus.CANCELED
+            assert not container.wait_registry.has(retained.continuation_id)
+            if termination != "cleanup_failure":
+                with pytest.raises(InteractionResolutionError, match="not open"):
+                    await InteractionResolver(
+                        container.cont_store,
+                        run_manager=container.run_manager,
+                    ).resolve_exact(
+                        session_id="parent",
+                        interaction_id=event.meta["interaction_id"],
+                        expected_kinds={"user_input"},
+                    )
+            assert (await facade.inspect_run(sibling_id)).status is RunStatus.running
+            sibling_release.set()
+            record, output = await asyncio.wait_for(
+                facade.wait_run(sibling_id, return_outputs=True),
+                10,
+            )
+            assert record.status is RunStatus.succeeded
+            assert output == {"value": "sibling completed"}
+            assert sorted(executions) == sorted(result["ids"])
+        finally:
+            sibling_release.set()
+            await container.run_manager.close()
+            await container.close_storage()

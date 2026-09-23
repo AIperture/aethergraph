@@ -37,22 +37,61 @@ class WaitRegistry:
                 # deliver early resume if present
                 if token in self._pending_payloads:
                     payload = self._pending_payloads.pop(token)
-                    loop.call_soon(fut.set_result, payload)
+                    loop.call_soon(self._deliver_if_pending, fut, payload)
             return fut
 
-    def resolve(self, token: str, payload: dict | None = None) -> bool:
-        """Resolve from any thread; returns True if delivered to a registered Future."""
+    @staticmethod
+    def _deliver_if_pending(future: asyncio.Future, payload: Any) -> None:
+        if not future.done():
+            future.set_result(payload)
+
+    def resolve(
+        self,
+        token: str,
+        payload: dict | None = None,
+        *,
+        cache_if_missing: bool = True,
+    ) -> bool:
+        """Schedule one response on the registered waiter's owning loop.
+
+        Calls may originate from another thread. Completed waiters are never
+        released again; cancellation before the callback runs is respected.
+
+        Examples:
+            Retain an early response before registration:
+            ```python
+            waits.resolve("wait-1", {"text": "Ready"})
+            ```
+            Deliver a committed response only to its existing waiter:
+            ```python
+            scheduled = waits.resolve("wait-1", answer, cache_if_missing=False)
+            ```
+
+        Args:
+            token: Exact in-process wait identity.
+            payload: Response delivered to its waiter.
+            cache_if_missing: Retain an early response when registration has not
+                occurred. False for responses to already-registered durable waits.
+
+        Returns:
+            bool: True when delivery was scheduled on an active registered waiter.
+
+        Notes:
+            A missing waiter never causes execution to be launched.
+        """
         payload = payload or {}
         with self._lock:
             entry = self._futs.pop(token, None)
             if not entry:
                 # resume before register: stash
-                self._pending_payloads[token] = payload
+                if cache_if_missing:
+                    self._pending_payloads[token] = payload
                 return False
             loop, fut = entry
 
-        if not fut.done():
-            loop.call_soon_threadsafe(fut.set_result, payload)
+        if fut.done() or loop.is_closed():
+            return False
+        loop.call_soon_threadsafe(self._deliver_if_pending, fut, payload)
         return True
 
     def cancel(self, token: str, exc: BaseException | None = None) -> bool:

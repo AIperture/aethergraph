@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import logging
 from pathlib import Path, PurePath
 import random
@@ -30,6 +31,7 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
+from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.utils.mime_types import mime_type_for_filename
 
 
@@ -1479,6 +1481,8 @@ class ChannelSession:
             tags=["channel", "wait", kind],
             metadata=self._inject_context_meta({"channel_key": ch_key}),
         )
+        cont = None
+        fut = None
         try:
             resumed = self._take_matching_resume_payload(kind=kind, expected_payload=payload)
             if resumed is not None:
@@ -1517,9 +1521,36 @@ class ChannelSession:
             await span.resume(metadata=wait_meta, response=result)
             await span.finish(response=result, metadata=wait_meta)
             return result
-        except Exception as exc:
+        except BaseException as exc:
+            if cont is not None:
+                try:
+                    current = await self._cont_store.get_by_id(
+                        cont.run_id,
+                        cont.node_id,
+                        cont.continuation_id,
+                    )
+                    if current is not None and not current.closed:
+                        await self._cont_store.close(
+                            current,
+                            status=ContinuationStatus.CANCELED,
+                            closed_at=datetime.now(UTC),
+                        )
+                except Exception:
+                    self.ctx.logger().exception(
+                        "Failed to close interrupted interaction",
+                        extra={
+                            "run_id": cont.run_id,
+                            "node_id": cont.node_id,
+                            "continuation_id": cont.continuation_id,
+                        },
+                    )
             await span.fail(exc, metadata=self._inject_context_meta({"channel_key": ch_key}))
             raise
+        finally:
+            if fut is not None:
+                if not fut.done():
+                    fut.cancel()
+                self.ctx.services.wait_registry.cancel(cont.continuation_id)
 
     def _take_matching_resume_payload(
         self,
