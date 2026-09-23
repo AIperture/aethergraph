@@ -204,7 +204,10 @@ class RuntimeEnv:
 
         runner = RunFacade(
             run_manager=self.container.run_manager,
-            identity=self.identity,
+            # An unscoped direct caller is still a bound identity. Passing None
+            # lets RunManager choose its top-level local defaults and moves the
+            # child into another tenant's session storage.
+            identity=self.identity if self.identity is not None else RequestIdentity(),
             session_id=self.session_id,
             agent_id=self.agent_id,
             app_id=self.app_id,
