@@ -6,6 +6,7 @@ from aethergraph.contracts.services.channel import (
     ChannelRoutingError,
     OutEvent,
 )
+from aethergraph.core.runtime.run_types import RunParent
 from aethergraph.services.channel.choices import build_choice_options, prompt_choices_from_prompt
 
 
@@ -108,12 +109,33 @@ class ChannelBus:
         return res
 
     # ---- continuation-aware notify (used by ChannelSession.ask_*) ----
-    async def notify(self, continuation) -> dict | None:
-        """
-        Present a prompt for a Continuation, returning either:
-        - {"payload": {...}} for inline adapters (console/local-web), or
-        - {"correlator": Correlator(...)} for push-only adapters (Slack/Telegram).
-        Never calls resume_router here; ChannelSession owns the wait/inline short-circuit.
+    async def notify(self, continuation, *, audience: RunParent | None = None) -> dict | None:
+        """Present a stored question in its owner's or an explicit parent's conversation.
+
+        Publication never mutates continuation ownership or resolves its answer.
+        An explicit audience changes conversation grouping while retaining the
+        exact question owner in event metadata.
+
+        Examples:
+            Publish in the question owner's conversation:
+            ```python
+            receipt = await bus.notify(question)
+            ```
+            Publish a child's question to its trusted submitting parent:
+            ```python
+            receipt = await bus.notify(question, audience=child_run.parent)
+            ```
+
+        Args:
+            continuation: Stored question or its issuance envelope.
+            audience: Trusted parent run/session selected by the lifecycle owner.
+
+        Returns:
+            dict | None: Inline payload or push-delivery receipt from the adapter.
+
+        Notes:
+            The caller validates parent lineage before supplying an audience.
+            Response authorization continues to use the stored question owner.
         """
         ch = continuation.channel
         kind = continuation.kind
@@ -164,6 +186,16 @@ class ChannelBus:
         graph_id = getattr(continuation, "graph_id", None)
         if graph_id is not None:
             meta.setdefault("graph_id", graph_id)
+
+        if audience is not None:
+            meta["interaction_owner"] = {
+                "continuation_id": continuation.continuation_id,
+                "session_id": session_id,
+                "run_id": run_id,
+                "node_id": node_id,
+            }
+            meta["session_id"] = audience.session_id
+            meta["run_id"] = audience.run_id
 
         # Shape event
         if kind == "user_input":

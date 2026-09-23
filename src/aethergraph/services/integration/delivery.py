@@ -141,6 +141,11 @@ class SemanticEventEmitter:
                         extensions={
                             "aethergraph.channel": event.channel,
                             **(
+                                {"aethergraph.interaction_owner": dict(meta["interaction_owner"])}
+                                if meta.get("interaction_owner") is not None
+                                else {}
+                            ),
+                            **(
                                 {"aethergraph.upsert_key": event.upsert_key}
                                 if event.upsert_key
                                 else {}

@@ -17,7 +17,7 @@ from aethergraph.contracts.integration import (
     WarningRaisedPayload,
 )
 from aethergraph.contracts.services.channel import Button, ChannelAction, OutEvent
-from aethergraph.core.runtime.run_types import RunStatus
+from aethergraph.core.runtime.run_types import RunParent, RunStatus
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.integration import (
@@ -35,6 +35,54 @@ def _meta() -> dict[str, str]:
         "session_id": "session-1",
         "agent_id": "agent.support",
     }
+
+
+@pytest.mark.asyncio
+async def test_child_question_audience_preserves_exact_stored_owner():
+    store = make_semantic_event_store()
+    bus = ChannelBus(
+        {
+            "endpoint": SemanticEventChannelAdapter(
+                emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+            )
+        }
+    )
+    question = Continuation(
+        continuation_id="child-question",
+        revision=1,
+        run_id="child-run",
+        node_id="child-node",
+        session_id="child-session",
+        agent_id="child",
+        kind="user_input",
+        channel="endpoint:conversation/parent",
+        prompt="Material?",
+        payload={"_interaction_id": "public-question"},
+    )
+    before = question.to_dict()
+    try:
+        await bus.notify(
+            question, audience=RunParent(run_id="parent-run", session_id="parent-session")
+        )
+        history = await store.list_session(
+            deployment_id="deployment-1", session_id="parent-session"
+        )
+        assert len(history) == 1
+        event = history[0].event
+        assert event.turn_id == "parent-run" and event.producer == "child"
+        assert event.payload.interaction_id == "public-question"
+        assert event.extensions["aethergraph.interaction_owner"] == {
+            "continuation_id": "child-question",
+            "session_id": "child-session",
+            "run_id": "child-run",
+            "node_id": "child-node",
+        }
+        assert question.to_dict() == before
+        assert not await store.list_session(
+            deployment_id="deployment-1", session_id="child-session"
+        )
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
