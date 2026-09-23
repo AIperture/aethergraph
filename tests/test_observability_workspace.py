@@ -10,6 +10,7 @@ import pytest
 from aethergraph.config.storage_provider import StorageProviderSettings
 from aethergraph.observability import (
     ObservabilityFacade,
+    ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
     open_observability_workspace,
 )
@@ -502,6 +503,41 @@ async def test_session_agent_state_reads_exact_owner_without_runtime_or_writes(
     reader = open_observability_workspace(tmp_path)
     try:
         expected = None if hidden_kind else {"cursor": 7}
+        if hidden_kind:
+            with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="work",
+                    require_accessible=True,
+                )
+        else:
+            assert (
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="work",
+                    require_accessible=True,
+                )
+                == expected
+            )
+            assert (
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="missing",
+                    require_accessible=True,
+                )
+                is None
+            )
+        for session_id, run_id in [("s2", "r1"), ("s1", "missing")]:
+            with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+                await reader.read_session_state(
+                    session_id=session_id,
+                    owner_run_id=run_id,
+                    key="work",
+                    require_accessible=True,
+                )
         assert (
             await reader.read_session_state(session_id="s1", owner_run_id="r1", key="work")
             == expected
@@ -525,6 +561,13 @@ async def test_session_agent_state_reads_exact_owner_without_runtime_or_writes(
         tmp_path, identity=ObservabilityIdentity(mode="cloud", org_id="org-1", user_id="user-2")
     )
     try:
+        with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+            await foreign.read_session_state(
+                session_id="s1",
+                owner_run_id="r1",
+                key="work",
+                require_accessible=True,
+            )
         assert (
             await foreign.read_session_state(session_id="s1", owner_run_id="r1", key="work") is None
         )

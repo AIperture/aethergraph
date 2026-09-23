@@ -567,7 +567,7 @@ class _CanonicalObservabilityFacade:
         return records
 
     async def read_session_state(
-        self, *, session_id: str, owner_run_id: str, key: str
+        self, *, session_id: str, owner_run_id: str, key: str, require_accessible: bool = False
     ) -> dict[str, Any] | None:
         """Read canonical session Agent state using an authorized run's exact owner.
 
@@ -594,10 +594,13 @@ class _CanonicalObservabilityFacade:
             session_id: Exact session containing the state.
             owner_run_id: Retained run whose canonical scope authorizes the read.
             key: Exact caller-owned state key; no namespace or scope override.
+            require_accessible: Raise when ownership cannot be established or is
+                suppressed, so lifecycle callers cannot mistake unavailable state for empty state.
 
         Returns:
             dict[str, Any] | None: Detached current state, or None for absent or
-                suppressed state and inaccessible or mismatched owners.
+                suppressed state and inaccessible or mismatched owners. When
+                require_accessible is true, only an absent key returns None.
 
         Notes:
             This uses the Agent-state facade and its session projection. It never
@@ -614,13 +617,19 @@ class _CanonicalObservabilityFacade:
         if session_id in hidden.get("session_id", set()) or owner_run_id in (
             hidden.get("run_id", set()) | hidden.get("trace_id", set())
         ):
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
             return None
         scope = self._query_scope(session_id=session_id, run_id=owner_run_id)
         if scope is None:
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
             return None
         bundle = await self._bundle()
         owner = await bundle.runs.get(scope, owner_run_id)
         if owner is None or owner.scope.session_id != session_id:
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
             return None
         facade = CanonicalAgentStateFacade(
             state_store=bundle.state, scope=replace(owner.scope, agent_id=None)
