@@ -454,6 +454,10 @@ class RunResultRepository(Protocol):
 
         Notes:
             The provider coordinates run `result_available` updates transactionally.
+            Accept results while the owning run is running, before the runtime
+            publishes terminal success; also allow successful-result refinement.
+            Reject pending, waiting, failed and cancellation states. Availability
+            alone does not establish terminal success.
         """
         ...
 

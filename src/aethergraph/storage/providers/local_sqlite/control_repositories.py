@@ -459,7 +459,8 @@ class LocalRunResultRepository:
             RunResultRecord: Newly committed durable result.
 
         Notes:
-            The owning run must already be successful and in the exact same scope.
+            The owning run must be running or successful and in the exact same scope.
+            Running output is persisted before the runtime publishes terminal success.
         """
         self._require_writable()
         _next_revision(record.revision, expected_revision)
@@ -473,8 +474,8 @@ class LocalRunResultRepository:
             run = _run(run_row)
             if run.scope != record.scope or run.graph_id != record.graph_id:
                 raise StorageNotFoundError(record.run_id)
-            if run.status is not RunStatus.SUCCEEDED:
-                raise StorageIntegrityError("Run result requires an already successful run")
+            if run.status not in {RunStatus.RUNNING, RunStatus.SUCCEEDED}:
+                raise StorageIntegrityError("Run result requires a running or successful run")
             existing = connection.execute(
                 "SELECT * FROM local_run_results WHERE run_id = ?", (record.run_id,)
             ).fetchone()

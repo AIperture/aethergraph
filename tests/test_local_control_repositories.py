@@ -313,11 +313,68 @@ async def test_result_and_run_availability_commit_together(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_result_rejects_non_successful_or_cross_scope_run(tmp_path: Path) -> None:
+async def test_running_result_is_durable_before_success(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     runs = LocalRunRepository(database=database)
     results = LocalRunResultRepository(database=database)
-    running = _run("run-1")
+    running = _run("result-before-success")
+    await runs.create(running)
+    result = RunResultRecord(
+        run_id=running.run_id,
+        graph_id=running.graph_id,
+        scope=running.scope,
+        status=RunStatus.SUCCEEDED,
+        outputs={"answer": 42},
+        revision=1,
+        created_at=NOW,
+        updated_at=NOW,
+        source="runtime",
+    )
+    await results.compare_and_set(result, 0)
+    marked = await runs.get(running.scope, running.run_id)
+    assert marked.status is RunStatus.RUNNING and marked.finished_at is None
+    assert marked.result_available and marked.result_updated_at == NOW
+    await database.close()
+
+    # A restart in this boundary retains output without claiming terminal success.
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    try:
+        runs = LocalRunRepository(database=reopened)
+        results = LocalRunResultRepository(database=reopened)
+        assert await results.get(running.scope, running.run_id) == result
+        retained = await runs.get(running.scope, running.run_id)
+        assert retained == marked
+        completed = replace(
+            retained, revision=retained.revision + 1, status=RunStatus.SUCCEEDED, finished_at=NOW
+        )
+        await runs.compare_and_set(completed, retained.revision)
+        assert (await runs.get(running.scope, running.run_id)).status is RunStatus.SUCCEEDED
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        RunStatus.PENDING,
+        RunStatus.WAITING,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.CANCELLATION_REQUESTED,
+    ],
+)
+async def test_result_rejects_ineligible_or_cross_scope_run(
+    tmp_path: Path, status: RunStatus
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    runs = LocalRunRepository(database=database)
+    results = LocalRunResultRepository(database=database)
+    running = replace(
+        _run("run-1"),
+        status=status,
+        finished_at=NOW if status in {RunStatus.FAILED, RunStatus.CANCELED} else None,
+    )
     await runs.create(running)
     result = RunResultRecord(
         run_id=running.run_id,
