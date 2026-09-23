@@ -213,6 +213,11 @@ class RuntimeEnv:
             app_id=self.app_id,
             current_run_id=self.run_id,
             origin_binding=self.origin_binding,
+            session_state_reader=(
+                self.container.observability.read_session_state
+                if self.container.observability is not None
+                else None
+            ),
         )
 
         services = NodeServices(

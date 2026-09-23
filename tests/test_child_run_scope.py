@@ -39,6 +39,9 @@ async def test_scheduled_child_retains_root_authority_for_later_grandchildren(tm
     captured = {}
 
     async def grandchild(*, context: NodeContext):
+        state = context.state("child:lifecycle", model=dict, level="session")
+        await state.load()
+        await state.commit({"pending": True}, reason="child lifecycle")
         return {"value": "grandchild completed"}
 
     leaf = GraphFunction(
@@ -72,6 +75,7 @@ async def test_scheduled_child_retains_root_authority_for_later_grandchildren(tm
 
     async def parent(*, context: NodeContext):
         captured["root_run_id"] = context.run_id
+        captured["root_facade"] = context.runner()
         child_id = await context.runner().spawn_run(relay.name, inputs={}, session_id="child")
         _, result = await context.runner().wait_run(child_id, return_outputs=True)
         return result
@@ -95,7 +99,7 @@ async def test_scheduled_child_retains_root_authority_for_later_grandchildren(tm
             )
             ended = await asyncio.wait_for(container.run_manager.wait_run(fired.run_id), 10)
             assert ended.status is RunStatus.succeeded, ended.error
-            root_facade = RunFacade(container.run_manager, session_id="root")
+            root_facade = captured["root_facade"]
             # Both records must remain accessible after the original parent and
             # child have completed; a shared channel is neither needed nor used.
             record, output = await root_facade.wait_run(fired.run_id, return_outputs=True)
@@ -106,6 +110,27 @@ async def test_scheduled_child_retains_root_authority_for_later_grandchildren(tm
             )
             assert leaf_record.session_id == "grandchild"
             assert leaf_output == {"value": "grandchild completed"}
+            assert await root_facade.read_session_state(
+                leaf_record.run_id, key="child:lifecycle"
+            ) == {"pending": True}
+            assert await root_facade.read_session_state(leaf_record.run_id, key="missing") is None
+            detached = await root_facade.read_session_state(
+                leaf_record.run_id, key="child:lifecycle"
+            )
+            detached["pending"] = False
+            assert await root_facade.read_session_state(
+                leaf_record.run_id, key="child:lifecycle"
+            ) == {"pending": True}
+            with pytest.raises(RuntimeError, match="unavailable"):
+                await replace(root_facade, session_state_reader=None).read_session_state(
+                    leaf_record.run_id, key="child:lifecycle"
+                )
+            for foreign in (
+                replace(root_facade, session_id="unrelated"),
+                replace(root_facade, identity=RequestIdentity(org_id="foreign", user_id="other")),
+            ):
+                with pytest.raises(LookupError):
+                    await foreign.read_session_state(leaf_record.run_id, key="child:lifecycle")
             with pytest.raises(LookupError):
                 await RunFacade(container.run_manager, session_id="unrelated").inspect_run(
                     leaf_record.run_id

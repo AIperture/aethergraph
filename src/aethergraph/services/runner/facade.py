@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from threading import Event
 from typing import TYPE_CHECKING, Any
@@ -53,7 +54,9 @@ class RunFacade:
         session_id: Optional default session id for child runs.
         agent_id: Optional default agent id for child runs.
         app_id: Optional default app id for child runs.
+        current_run_id: Trusted submitting run used for parent provenance.
         origin_binding: Optional immutable run origin propagated to child runs.
+        session_state_reader: Optional canonical read-only state reader supplied by runtime services.
 
     Returns:
         RunFacade: Bound facade for child run orchestration APIs.
@@ -70,6 +73,7 @@ class RunFacade:
     app_id: str | None = None
     current_run_id: str | None = None
     origin_binding: OriginBinding | None = None
+    session_state_reader: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
 
     def _child_run_config(self, *, session_id: str | None = None) -> dict[str, Any]:
         """Build inherited runtime configuration for a child run.
@@ -179,6 +183,42 @@ class RunFacade:
             ):
                 raise LookupError("Run does not exist in the caller scope")
         return record
+
+    async def read_session_state(self, run_id: str, *, key: str) -> dict[str, Any] | None:
+        """Read an owned run's session state without granting a cross-session writer.
+
+        Examples:
+            Inspect retained child lifecycle state:
+            ```python
+            state = await context.runner().read_session_state(child_run_id, key="my:lifecycle")
+            ```
+            Distinguish a missing state key from an inaccessible child:
+            ```python
+            assert await context.runner().read_session_state(child_run_id, key="missing") is None
+            ```
+        Args:
+            run_id: Exact run in this session or an authorized descendant.
+            key: Exact session state key to inspect.
+        Returns:
+            dict[str, Any] | None: Current detached mapping, or an absent key.
+        Notes:
+            The existing run ownership check precedes the canonical read-only
+            facade. Missing, suppressed or foreign owners fail visibly. This API
+            exposes no state handle and cannot change another session's revision.
+        """
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Session state inspection requires an exact key")
+        record = await self.inspect_run(run_id)
+        if not record.session_id:
+            raise ValueError("Session state inspection requires a retained run session")
+        if self.session_state_reader is None:
+            raise RuntimeError("Session state inspection is unavailable in this runtime")
+        return await self.session_state_reader(
+            session_id=record.session_id,
+            owner_run_id=run_id,
+            key=key,
+            require_accessible=True,
+        )
 
     async def spawn_run(
         self,
