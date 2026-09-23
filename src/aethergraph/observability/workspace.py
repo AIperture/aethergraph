@@ -523,6 +523,45 @@ class _CanonicalObservabilityFacade:
         record = await bundle.runs.get(scope, run_id)
         return None if record is None else asdict(project_canonical_run_record(record))
 
+    async def get_run_output(self, run_id: str) -> dict[str, Any] | None:
+        """Read retained successful output without starting a runtime.
+
+        Intro:
+            The canonical result repository enforces the same owner and request
+            identity scope as run inspection. No run or result is acknowledged.
+
+        Examples:
+            Read a completed control receipt after its Host exits:
+                ```python
+                output = await facade.get_run_output("control-1")
+                ```
+            Handle unavailable output:
+                ```python
+                assert await facade.get_run_output("missing") is None
+                ```
+
+        Args:
+            run_id: Exact canonical run identity.
+
+        Returns:
+            dict[str, Any] | None: Retained graph output, or `None` if absent
+                or outside the caller's scope.
+
+        Notes:
+            Absence does not imply execution failure. Callers needing lifecycle
+            state inspect the owning run separately.
+        """
+        bundle = await self._bundle()
+        scope = self._query_scope(run_id=run_id)
+        if scope is None:
+            return None
+        result = await bundle.run_results.get(scope, run_id)
+        if result is None:
+            return None
+        if not isinstance(result.outputs, Mapping):
+            raise ObservabilityUnavailableError("Retained run output is not an object")
+        return dict(result.outputs)
+
     async def list_engine_events(self, *, run_id: str) -> list[dict[str, Any]]:
         """List canonical Engine events for one run in causal storage order.
 

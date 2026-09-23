@@ -25,6 +25,7 @@ from aethergraph.storage.contracts import (
     ObservationSeverity,
     ObservationStatus,
     RunRecord,
+    RunResultRecord,
     RunStatus,
     StorageOpenMode,
     StorageOpenRequest,
@@ -65,6 +66,75 @@ def _provider_and_request(root: Path):
         secrets=_Secrets(),
     )
     return provider, request
+
+
+@pytest.mark.asyncio
+async def test_retained_run_output_survives_close_and_enforces_reader_identity(tmp_path):
+    from aethergraph.observability import ObservabilityIdentity
+
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    scope = StorageScope(
+        project_id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session",
+        run_id="control",
+        graph_id="control.graph",
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="control",
+            graph_id="control.graph",
+            kind="graph_fn",
+            status=RunStatus.SUCCEEDED,
+            scope=scope,
+            revision=1,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+    )
+    output = {"result": {"data": {"control": {"acknowledged": True}}}}
+    await bundle.run_results.compare_and_set(
+        RunResultRecord(
+            run_id="control",
+            graph_id="control.graph",
+            scope=scope,
+            status=RunStatus.SUCCEEDED,
+            outputs=output,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+            source="graph_fn",
+        ),
+        0,
+    )
+    await bundle.close()
+    for user, org, allowed in (
+        ("user-1", "org-1", True),
+        ("other-user", "org-1", False),
+        ("user-1", "other-org", False),
+        (None, "org-1", False),
+    ):
+        reader = open_observability_workspace(
+            tmp_path,
+            identity=ObservabilityIdentity(mode="cloud", user_id=user, org_id=org),
+        )
+        try:
+            assert await reader.get_run_output("control") == (output if allowed else None)
+            assert await reader.get_run_output("missing") is None
+            if allowed:
+                run = await reader.get_run("control")
+                assert run["result_available"] is True
+                assert await reader.get_run_output("control") == output
+        finally:
+            await reader.close()
+    reopened = provider.open(request)
+    try:
+        retained = await reopened.run_results.get(scope, "control")
+        assert retained.revision == 1 and retained.outputs == output
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio
