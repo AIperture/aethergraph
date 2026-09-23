@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 import importlib
 from pathlib import Path
 import sys
@@ -28,6 +28,7 @@ from aethergraph.services.container.default_container import (
     DefaultContainer,
     build_default_container,
 )
+from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.services.integration import (
     InteractionResolutionError,
     InteractionResolver,
@@ -48,6 +49,7 @@ from .contracts import (
     RuntimeArtifactScope,
     RuntimeGraphRegistration,
     RuntimeIdentity,
+    RuntimeInteractionStatus,
     RuntimeModelProfile,
     RuntimeOpenRequest,
     RuntimeRegistrationSnapshot,
@@ -602,6 +604,67 @@ class EmbeddedRuntime:
             output=output,
             run_error_info=run_error_info,
             node_diagnostics=diagnostics,
+        )
+
+    async def inspect_interaction(
+        self, *, session_id: str, interaction_id: str
+    ) -> RuntimeInteractionStatus:
+        """Inspect one exact question independently of its parent's execution state.
+
+        Canonical continuation state and deadline determine response eligibility.
+        Inspection performs no resume, timer delivery or model invocation.
+
+        Examples:
+            Read an open question:
+            ```python
+            state = await runtime.inspect_interaction(
+                session_id="parent", interaction_id="question-1",
+            )
+            ```
+            Read it after a response:
+            ```python
+            final = await runtime.inspect_interaction(
+                session_id="parent", interaction_id=state.interaction_id,
+            )
+            ```
+
+        Args:
+            session_id: Owning session or authorized submitting ancestor.
+            interaction_id: Exact public question identity.
+
+        Returns:
+            RuntimeInteractionStatus: Waiting, resumed, canceled or expired state,
+                with canonical revision and timestamps. Response contents stay private.
+
+        Notes:
+            An elapsed deadline is expired even before timer delivery. A retained
+            deadline response is expired, not a user answer. Unknown or unauthorized
+            identities raise RuntimeInteractionError through the answer boundary.
+        """
+        await self._ensure_ready()
+        try:
+            resolved = await InteractionResolver(
+                self._container.cont_store, run_manager=self._container.run_manager
+            ).inspect_exact(session_id=session_id, interaction_id=interaction_id)
+        except InteractionResolutionError as exc:
+            raise RuntimeInteractionError(code=exc.code, message=str(exc)) from exc
+        wait = resolved.continuation
+        status = wait.status
+        if status is ContinuationStatus.WAITING:
+            if wait.deadline is not None and wait.deadline <= datetime.now(UTC):
+                status = ContinuationStatus.EXPIRED
+        elif status is ContinuationStatus.RESUMED:
+            payload = wait.payload or {}
+            if payload.get("timer_kind") == "deadline" or payload.get("timed_out") is True:
+                status = ContinuationStatus.EXPIRED
+            elif payload.get("cancelled") is True:
+                status = ContinuationStatus.CANCELED
+        return RuntimeInteractionStatus(
+            interaction_id=interaction_id,
+            status=status.value,
+            revision=wait.revision,
+            deadline=wait.deadline,
+            closed_at=wait.closed_at,
         )
 
     async def respond_to_interaction(

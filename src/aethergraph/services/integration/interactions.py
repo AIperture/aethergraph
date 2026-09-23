@@ -12,6 +12,7 @@ from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.continuations.continuation import (
     Continuation,
     ContinuationQuery,
+    ContinuationStatus,
     Correlator,
 )
 from aethergraph.services.runner.facade import RunFacade
@@ -228,6 +229,52 @@ class InteractionResolver:
             free text only considers waits owned directly by the bound session.
         """
 
+        resolved = await self.inspect_exact(session_id=session_id, interaction_id=interaction_id)
+        wait = resolved.continuation
+        if wait.closed or (wait.deadline is not None and wait.deadline <= datetime.now(UTC)):
+            raise InteractionResolutionError(
+                code="integration.interaction_not_found",
+                message="The supplied interaction identity is not open.",
+            )
+        if wait.kind not in expected_kinds:
+            raise InteractionResolutionError(
+                code="integration.interaction_kind_mismatch",
+                message="The interaction does not accept this response kind.",
+            )
+        return resolved
+
+    async def inspect_exact(self, *, session_id: str, interaction_id: str) -> ResolvedInteraction:
+        """Read one retained question through the same ownership boundary as answers.
+
+        Inspection includes terminal questions and never resumes execution or
+        exposes a continuation token. Callers may inspect a known descendant
+        question only through its retained submission lineage.
+
+        Examples:
+            Read an open question:
+            ```python
+            question = await resolver.inspect_exact(
+                session_id="parent", interaction_id="question-1",
+            )
+            ```
+            Read its retained terminal state:
+            ```python
+            final = await resolver.inspect_exact(
+                session_id="parent", interaction_id=question.interaction_id,
+            )
+            ```
+
+        Args:
+            session_id: Question owner's session or an authorized submitting ancestor.
+            interaction_id: Exact public question identity.
+
+        Returns:
+            ResolvedInteraction: Retained canonical continuation and public identity.
+
+        Notes:
+            Unknown, ambiguous and unauthorized identities raise resolution errors.
+            The caller interprets deadline eligibility without mutating the record.
+        """
         correlator = Correlator(
             scheme="interaction",
             channel="public",
@@ -238,7 +285,7 @@ class InteractionResolver:
                 await self.store.query(
                     ContinuationQuery(
                         correlator=correlator,
-                        open_at=datetime.now(UTC),
+                        statuses=tuple(ContinuationStatus),
                         limit=2,
                     )
                 )
@@ -247,7 +294,7 @@ class InteractionResolver:
         if not exact:
             raise InteractionResolutionError(
                 code="integration.interaction_not_found",
-                message="The supplied interaction identity is not open.",
+                message="The supplied interaction identity was not found.",
             )
         if len(exact) > 1:
             raise InteractionResolutionError(
@@ -270,11 +317,6 @@ class InteractionResolver:
             raise InteractionResolutionError(
                 code="integration.interaction_session_mismatch",
                 message="The interaction does not belong to the bound AG session.",
-            )
-        if wait.kind not in expected_kinds:
-            raise InteractionResolutionError(
-                code="integration.interaction_kind_mismatch",
-                message="The interaction does not accept this response kind.",
             )
         return ResolvedInteraction(
             interaction_id=interaction_id,
