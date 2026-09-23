@@ -24,6 +24,7 @@ class TriggerService(Protocol):
         origin: str = "schedule",
         trigger_name: str | None = None,
         meta: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any: ...  # should return TriggerRecord, but we avoid importing it here to keep this protocol decoupled from the data layer
 
     async def cancel(

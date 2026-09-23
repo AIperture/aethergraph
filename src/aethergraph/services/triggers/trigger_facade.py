@@ -91,6 +91,7 @@ class TriggerFacade:
         default_inputs: dict[str, Any],
         config: TriggerConfig,
         trigger_name: str | None = None,
+        idempotency_key: str | None = None,
     ) -> TriggerRecord:
         """
         Create a trigger from an explicit `TriggerConfig`.
@@ -124,6 +125,9 @@ class TriggerFacade:
             default_inputs: Base inputs merged into submitted runs.
             config: Trigger configuration payload describing kind and timing.
             trigger_name: Optional human-readable trigger label.
+            idempotency_key: Optional stable creation identity in the bound owner,
+                session and Agent scope. Identical retries reuse the schedule without
+                restarting it; changed requests with the same key fail.
 
         Returns:
             TriggerRecord: Persisted trigger record returned by the trigger
@@ -148,6 +152,7 @@ class TriggerFacade:
             catch_up_missed=config.catch_up_missed,
             origin="schedule" if config.kind != "event" else "event",
             trigger_name=trigger_name,
+            idempotency_key=idempotency_key,
         )
 
     # ------------ higher-level: event triggers with convenient defaults --------------

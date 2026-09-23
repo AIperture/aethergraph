@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from inspect import getdoc
 from pathlib import Path
@@ -195,6 +195,83 @@ async def test_trigger_service_consumes_canonical_store_without_app_or_client_pa
     canceled = await store.get(trigger.trigger_id)
     assert canceled is not None and canceled.active is False
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_trigger_creation_replay_preserves_cancellation_and_revision(tmp_path: Path) -> None:
+    store, repository, database, _clock = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    scope = Scope(org_id="org-1", user_id="user-1", session_id="session-1", agent_id="agent-1")
+    request = dict(
+        graph_id="wake",
+        default_inputs={"message": "ready"},
+        kind="interval",
+        interval_seconds=60,
+        idempotency_key="delivery-1",
+    )
+    try:
+        created = await service.create_from_scope(scope=scope, **request)
+        assert await service.cancel(
+            created.trigger_id,
+            org_id="org-1",
+            user_id="user-1",
+            client_id=None,
+        )
+        before = await repository.get(OWNER, created.trigger_id)
+        replayed = await service.create_from_scope(
+            scope=replace(scope, run_id="recovery-run", node_id="recovery-node"),
+            **request,
+        )
+        after = await repository.get(OWNER, created.trigger_id)
+        assert replayed.trigger_id == created.trigger_id
+        assert replayed.active is False
+        assert before is not None and after is not None
+        assert after.revision == before.revision
+        assert after.next_fire_at == before.next_fire_at
+        with pytest.raises(StorageConflictError, match="different request"):
+            await service.create_from_scope(scope=scope, **{**request, "interval_seconds": 120})
+        other = await service.create_from_scope(
+            scope=replace(scope, session_id="session-2"),
+            **request,
+        )
+        assert other.trigger_id != created.trigger_id
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_trigger_creation_recovers_lost_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, database, _clock = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    request = dict(
+        scope=Scope(org_id="org-1", user_id="user-1", session_id="session-1"),
+        graph_id="wake",
+        default_inputs={},
+        kind="interval",
+        interval_seconds=60,
+        idempotency_key="delivery-1",
+    )
+    create = store.create
+    created_ids: list[str] = []
+
+    async def lose_acknowledgement(record: TriggerRecord) -> None:
+        await create(record)
+        created_ids.append(record.trigger_id)
+        raise OSError("creation acknowledgement lost")
+
+    monkeypatch.setattr(store, "create", lose_acknowledgement)
+    try:
+        with pytest.raises(OSError, match="acknowledgement lost"):
+            await service.create_from_scope(**request)
+        recovered = await service.create_from_scope(**request)
+        assert created_ids == [recovered.trigger_id]
+        persisted = await repository.get(OWNER, recovered.trigger_id)
+        assert persisted is not None and persisted.revision == 1
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
