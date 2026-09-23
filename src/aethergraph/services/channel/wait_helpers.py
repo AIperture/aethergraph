@@ -1,6 +1,5 @@
 from typing import Any
-
-from aethergraph.services.continuations.continuation import Correlator
+from uuid import uuid4
 
 
 async def create_and_notify_continuation(
@@ -11,49 +10,50 @@ async def create_and_notify_continuation(
     timeout_s: int,
     channel: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
+    """Create one public interaction before publishing its question.
+
+    Dual-stage tools keep their normal scheduler resume even for inline answers.
+    Delivery does not mutate the issued continuation or add transport lookup keys.
+
+    Examples:
+        Ask for text:
+        ```python
+        token, inline = await create_and_notify_continuation(
+            context=context, kind="user_input", payload={"prompt": "Material?"}, timeout_s=60,
+        )
+        ```
+        Select an explicit delivery channel:
+        ```python
+        token, inline = await create_and_notify_continuation(
+            context=context, kind="user_input", payload={"prompt": "Name?"},
+            timeout_s=60, channel="endpoint:conversation/one",
+        )
+        ```
+
+    Args:
+        context: Execution context owning continuation creation and delivery.
+        kind: Runtime interaction kind.
+        payload: Question and continuation setup data.
+        timeout_s: Interaction lifetime in seconds.
+        channel: Optional explicit channel address.
+
+    Returns:
+        tuple[str, dict[str, Any] | None]: One-time token and optional inline response.
+
+    Notes:
+        Public interaction identity is distinct from the private resume token.
     """
-    Returns (token, inline_payload_or_none)
-    Also binds correlators into the continuation store best-effort.
-    """
-    bus = context.services.channels  # ChannelBus
-    store = context.services.continuation_store  # ContinuationStore
+    bus = context.services.channels
 
     ch_key = context.channel(channel)._resolve_key()
 
     cont = await context.create_continuation(
-        channel=ch_key, kind=kind, payload=payload, deadline_s=timeout_s
+        channel=ch_key,
+        kind=kind,
+        payload={**payload, "_interaction_id": f"interaction-{uuid4().hex}"},
+        deadline_s=timeout_s,
     )
 
     res = await bus.notify(cont)
     inline = (res or {}).get("payload")
-    if inline is not None:
-        # Don't short circut for DualStageTool, we will still roundtrip through resume
-        # so the toll path is uniform across adapters
-        pass
-
-    corr = (res or {}).get("correlator")
-    if corr:
-        cont.record = await store.bind_correlator(continuation=cont.record, corr=corr)
-        # also bind a message-less thread root for loopup by thread only
-        cont.record = await store.bind_correlator(
-            continuation=cont.record,
-            corr=Correlator(
-                scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
-            ),
-        )
-    else:
-        # best-effort: bind a correlator with just channel+thread if available
-        # best-effort
-        peek = await bus.peek_correlator(ch_key)
-        if peek:
-            cont.record = await store.bind_correlator(
-                continuation=cont.record,
-                corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
-            )
-        else:
-            cont.record = await store.bind_correlator(
-                continuation=cont.record,
-                corr=Correlator(bus._prefix(ch_key), ch_key, "", ""),
-            )
-
     return str(cont.token), inline

@@ -10,7 +10,6 @@ from aethergraph.plugins.channel.adapters.file import FileChannelAdapter
 from aethergraph.plugins.channel.adapters.slack import SlackChannelAdapter
 from aethergraph.plugins.channel.adapters.telegram import TelegramChannelAdapter
 from aethergraph.plugins.channel.adapters.webhook import WebhookChannelAdapter
-from aethergraph.services.channel.channel_bus import ChannelBus
 
 
 def make_channel_adapters_from_env(cfg: AppSettings) -> dict[str, Any]:
@@ -59,41 +58,3 @@ def make_channel_adapters_from_env(cfg: AppSettings) -> dict[str, Any]:
     adapters["webhook"] = WebhookChannelAdapter()
 
     return adapters
-
-
-def build_bus(
-    adapters: dict[str, Any],
-    logger=None,
-    resume_router=None,
-    cont_store=None,
-) -> ChannelBus:
-    """Build a Channel bus from explicit host-owned services.
-
-    Examples:
-        Build a bus with one adapter:
-        ```python
-        bus = build_bus({"console": console_adapter})
-        ```
-
-        Bind continuation infrastructure:
-        ```python
-        bus = build_bus(
-            adapters,
-            resume_router=resume_router,
-            cont_store=continuation_store,
-        )
-        ```
-
-    Args:
-        adapters: Exact adapter mapping keyed by channel prefix.
-        logger: Optional Channel logger.
-        resume_router: Optional continuation resume router.
-        cont_store: Optional continuation store.
-
-    Returns:
-        Channel bus with no mutable process-global default or aliases.
-
-    Notes:
-        Run origins and host logical routes are supplied outside the bus.
-    """
-    return ChannelBus(adapters, logger=logger, resume_router=resume_router, store=cont_store)

@@ -678,7 +678,7 @@ class EmbeddedRuntime:
         if response_kind == "choice":
             payload.update(
                 normalize_choice_reply(
-                    prompt=continuation.prompt,
+                    prompt=continuation.interaction_prompt,
                     raw_choice=choice,
                     raw_text=text,
                 )

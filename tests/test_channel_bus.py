@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from aethergraph.contracts.services.channel import Button, ChannelRoutingError, OutEvent
@@ -75,23 +73,8 @@ async def test_notify_exposes_public_identity_and_semantic_delivery_scope() -> N
                 )
             }
 
-    class _Store:
-        def __init__(self) -> None:
-            self.bindings: list[tuple[str, Correlator]] = []
-
-        async def bind_correlator(
-            self, *, continuation: Continuation, corr: Correlator
-        ) -> Continuation:
-            self.bindings.append((continuation.continuation_id, corr))
-            return replace(
-                continuation,
-                revision=continuation.revision + 1,
-                correlators=(*continuation.correlators, corr),
-            )
-
     adapter = _PushAdapter()
-    store = _Store()
-    bus = ChannelBus(adapters={"slack": adapter}, store=store)
+    bus = ChannelBus(adapters={"slack": adapter})
     continuation = CreatedContinuation(
         record=Continuation(
             continuation_id="cont-secret",
@@ -114,7 +97,8 @@ async def test_notify_exposes_public_identity_and_semantic_delivery_scope() -> N
     assert "resume_key" not in event_meta
     assert event_meta["run_id"] == "run-secret"
     assert event_meta["node_id"] == "node-secret"
-    assert store.bindings[0][0] == "cont-secret"
+    assert continuation.record.revision == 1
+    assert continuation.record.correlators == ()
 
 
 @pytest.mark.asyncio

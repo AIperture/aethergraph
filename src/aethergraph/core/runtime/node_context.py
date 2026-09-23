@@ -447,7 +447,9 @@ class NodeContext:
         if level is not None:
             if self.scope is None or self.services.memory is None:
                 raise RuntimeError("Trusted memory scope/factory not bound")
-            return self.services.memory.for_runtime_scope(self.scope, level=level, projection_logger=self.logger())
+            return self.services.memory.for_runtime_scope(
+                self.scope, level=level, projection_logger=self.logger()
+            )
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
@@ -964,11 +966,14 @@ class NodeContext:
                     message=interaction_id,
                 ),
             )
+        prompt = payload.get("prompt") if payload else None
+        if isinstance(prompt, dict):
+            prompt = prompt.get("title") or prompt.get("prompt")
         draft = ContinuationDraft(
             run_id=self.run_id,
             node_id=self.node_id,
             kind=kind,
-            prompt=payload.get("prompt") if payload else None,
+            prompt=prompt,
             resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
             deadline=deadline,

@@ -37,7 +37,7 @@ from aethergraph.services.auth.canonical_authn import CanonicalAuthnService
 from aethergraph.services.channel.channel_bus import ChannelBus
 
 # ---- channel services ----
-from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
+from aethergraph.services.channel.factory import make_channel_adapters_from_env
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
@@ -496,12 +496,7 @@ def build_default_container(
     selected_channel_adapters = (
         make_channel_adapters_from_env(cfg) if channel_adapters is None else dict(channel_adapters)
     )
-    channels = build_bus(
-        selected_channel_adapters,
-        logger=logger_factory.for_channel(),
-        resume_router=resume_router,
-        cont_store=services.continuations,
-    )
+    channels = ChannelBus(selected_channel_adapters)
 
     run_cancellation_registry = RunCancellationRegistry()
     run_manager = RunManager(

@@ -113,6 +113,37 @@ class Continuation:
     correlators: tuple[Correlator, ...] = ()
 
     @property
+    def interaction_prompt(self) -> str | dict[str, Any] | None:
+        """Return authored question data, including structured choice options.
+
+        The canonical prompt column is the text caption. Complete question data
+        is retained in the continuation setup payload and survives storage reload.
+
+        Examples:
+            Read structured choices:
+            ```python
+            choices = wait.interaction_prompt["choices"]
+            ```
+            Read a text-only continuation:
+            ```python
+            assert text_wait.interaction_prompt == "Material?"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | dict[str, Any] | None: Complete authored prompt, or the caption
+                for continuations with no question setup payload.
+
+        Notes:
+            This is a read projection, not a separately persisted question.
+        """
+        if self.payload is not None and "prompt" in self.payload:
+            return self.payload["prompt"]
+        return self.prompt
+
+    @property
     def closed(self) -> bool:
         """Report whether this record is terminal.
 

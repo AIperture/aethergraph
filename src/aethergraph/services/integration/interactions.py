@@ -352,7 +352,7 @@ def build_interaction_payload(
     if envelope.choice is not None:
         raw_choice = envelope.choice.option_ids[0]
         normalized = normalize_choice_reply(
-            prompt=continuation.prompt,
+            prompt=continuation.interaction_prompt,
             raw_choice=raw_choice,
             raw_text=envelope.text or "",
         )

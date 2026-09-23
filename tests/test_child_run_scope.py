@@ -18,7 +18,11 @@ from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.runner import run_async
 from aethergraph.services.container.default_container import build_default_container
-from aethergraph.services.continuations.continuation import ContinuationQuery, Correlator
+from aethergraph.services.continuations.continuation import (
+    ContinuationQuery,
+    ContinuationStatus,
+    Correlator,
+)
 from aethergraph.services.integration.interactions import (
     InteractionResolutionError,
     InteractionResolver,
@@ -172,26 +176,56 @@ async def test_isolated_child_is_owned_by_parent_session_after_run_completion(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("depth", [1, 2])
-async def test_parent_answers_live_isolated_child_after_parent_run_finishes(tmp_path, depth):
+@pytest.mark.parametrize("immediate", [False, True])
+@pytest.mark.parametrize("question_kind", ["text", "choice"])
+async def test_parent_answers_live_isolated_child_after_parent_run_finishes(
+    tmp_path, depth, immediate, question_kind
+):
     container = build_default_container(
         cfg=AppSettings(workspace=str(tmp_path), embed={"enabled": False}), root=str(tmp_path)
     )
     questions = asyncio.Queue()
     executions = []
+    answer_payload = {"text": "Titanium"} if question_kind == "text" else {"choice": "Ti"}
 
     class Questions:
         capabilities = {"text", "input"}
 
         async def send(self, event):
-            if event.type == "session.need_input":
+            if event.type in {"session.need_input", "session.need_approval"}:
+                if question_kind == "choice":
+                    assert [(button.value, button.label) for button in event.buttons] == [
+                        ("Titanium", "Titanium")
+                    ]
                 questions.put_nowait(event)
+                if immediate:
+                    selected = await InteractionResolver(
+                        container.cont_store,
+                        run_manager=container.run_manager,
+                    ).resolve_exact(
+                        session_id="parent-session",
+                        interaction_id=event.meta["interaction_id"],
+                        expected_kinds={"user_input", "choice"},
+                    )
+                    await container.resume_router.resume_continuation(
+                        selected.continuation,
+                        answer_payload,
+                    )
             return {"correlator": Correlator("test", event.channel, "", "question")}
 
     container.channels.register_adapter("test", Questions())
 
     async def child(*, context: NodeContext):
         executions.append(context.run_id)
-        answer = await context.channel("test:parent").ask_text("Which material?")
+        if question_kind == "text":
+            answer = await context.channel("test:parent").ask_text("Which material?")
+        else:
+            reply = await context.channel("test:parent").ask_choices(
+                "Which material?",
+                [{"id": "Titanium", "label": "Titanium", "aliases": ["Ti"]}],
+            )
+            assert reply.matched
+            answer = reply.choice
         return {"answer": answer}
 
     child_graph = GraphFunction(
@@ -236,39 +270,23 @@ async def test_parent_answers_live_isolated_child_after_parent_run_finishes(tmp_
             expected_session = "isolated-child" if depth == 1 else "isolated-grandchild"
             assert question.meta["session_id"] == expected_session
 
-            # This case isolates ownership after delivery registration completes.
-            # Immediate response racing correlator binding is qualified separately.
-            async def delivery_registered():
-                while True:
-                    page = await container.cont_store.query(
-                        ContinuationQuery(
-                            correlator=Correlator(
-                                "interaction", "public", message=question.meta["interaction_id"]
-                            ),
-                            limit=1,
-                        )
-                    )
-                    if page.items and len(page.items[0].correlators) == 3:
-                        return
-                    await asyncio.sleep(0.01)
-
-            await asyncio.wait_for(delivery_registered(), 10)
             resolver = InteractionResolver(container.cont_store, run_manager=container.run_manager)
-            with pytest.raises(InteractionResolutionError, match="bound AG session"):
+            with pytest.raises(InteractionResolutionError, match="bound AG session|not open"):
                 await resolver.resolve_exact(
                     session_id="unrelated-session",
                     interaction_id=question.meta["interaction_id"],
-                    expected_kinds={"user_input"},
+                    expected_kinds={"user_input", "choice"},
                 )
-            resolved = await resolver.resolve_exact(
-                session_id="parent-session",
-                interaction_id=question.meta["interaction_id"],
-                expected_kinds={"user_input"},
-            )
-            await container.resume_router.resume_continuation(
-                resolved.continuation,
-                {"text": "Titanium"},
-            )
+            if not immediate:
+                resolved = await resolver.resolve_exact(
+                    session_id="parent-session",
+                    interaction_id=question.meta["interaction_id"],
+                    expected_kinds={"user_input", "choice"},
+                )
+                await container.resume_router.resume_continuation(
+                    resolved.continuation,
+                    answer_payload,
+                )
             record, output = await asyncio.wait_for(
                 RunFacade(container.run_manager, session_id="parent-session").wait_run(
                     result["child_run"],
@@ -279,6 +297,17 @@ async def test_parent_answers_live_isolated_child_after_parent_run_finishes(tmp_
             assert record.status.value == "succeeded", record.error
             assert output == {"answer": "Titanium"}
             assert executions == [question.meta["run_id"]]
+            page = await container.cont_store.query(
+                ContinuationQuery(
+                    correlator=Correlator(
+                        "interaction", "public", message=question.meta["interaction_id"]
+                    ),
+                    statuses=(ContinuationStatus.RESUMED,),
+                    limit=1,
+                )
+            )
+            assert len(page.items[0].correlators) == 1
+            assert page.items[0].status.value == "resumed"
         finally:
             await container.run_manager.close()
             await container.close_storage()

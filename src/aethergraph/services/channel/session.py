@@ -31,7 +31,7 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
+from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.utils.mime_types import mime_type_for_filename
 
 
@@ -1528,30 +1528,6 @@ class ChannelSession:
                 await span.resume(metadata=wait_meta, response=inline)
                 await span.finish(response=inline, metadata=wait_meta)
                 return inline
-
-            corr = (res or {}).get("correlator")
-            if corr:
-                cont.record = await self._cont_store.bind_correlator(
-                    continuation=cont.record, corr=corr
-                )
-                cont.record = await self._cont_store.bind_correlator(
-                    continuation=cont.record,
-                    corr=Correlator(
-                        scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
-                    ),
-                )
-            else:
-                peek = await self._bus.peek_correlator(ch_key)
-                if peek:
-                    cont.record = await self._cont_store.bind_correlator(
-                        continuation=cont.record,
-                        corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
-                    )
-                else:
-                    cont.record = await self._cont_store.bind_correlator(
-                        continuation=cont.record,
-                        corr=Correlator(self._bus._prefix(ch_key), ch_key, "", ""),
-                    )
 
             result = await fut
             await span.resume(metadata=wait_meta, response=result)
