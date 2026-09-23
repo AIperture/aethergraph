@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -37,6 +38,7 @@ from aethergraph.storage.contracts import (
     SessionRecord as CanonicalSessionRecord,
     SessionRepository,
     StorageBundle,
+    StorageConflictError,
     StorageIntegrityError,
     StorageNotFoundError,
     StorageScope,
@@ -155,41 +157,61 @@ class CanonicalRunStore(RunStore):
             None: The run was absent, unchanged, or committed.
 
         Notes:
-            Unknown/provider-owned field changes fail; stale revisions propagate.
+            Unknown/provider-owned field changes fail. Bounded CAS retries merge
+            concurrent provider updates; terminal outcomes cannot be reopened.
         """
-        current = await self._repository.get(
-            _operation_scope(self._owner_scope, run_id=run_id), run_id
-        )
-        if current is None:
-            return
-        public, service, compatibility = _metadata_parts(current.metadata, "run")
-        public.update(_run_public_metadata(meta_update or {}))
-        if field_updates:
-            allowed = {"result_available", "result_updated_at"}
-            unknown = set(field_updates) - allowed
-            if unknown:
-                raise ValueError("Unsupported run field updates: " + ", ".join(sorted(unknown)))
-            if (
-                field_updates.get("result_available", current.result_available)
-                != current.result_available
-            ):
-                raise ValueError("result_available is provider-owned")
-            if (
-                field_updates.get("result_updated_at", current.result_updated_at)
-                != current.result_updated_at
-            ):
-                raise ValueError("result_updated_at is provider-owned")
-        proposed = replace(
-            current,
-            revision=current.revision + 1,
-            status=CanonicalRunStatus(status.value),
-            finished_at=current.finished_at if finished_at is None else finished_at,
-            error=current.error if error is None else error,
-            metadata=_metadata(public, service, compatibility),
-        )
-        if replace(proposed, revision=current.revision) == current:
-            return
-        await self._repository.compare_and_set(proposed, current.revision)
+        for attempt in range(8):
+            current = await self._repository.get(
+                _operation_scope(self._owner_scope, run_id=run_id), run_id
+            )
+            if current is None:
+                return
+            public, service, compatibility = _metadata_parts(current.metadata, "run")
+            public.update(_run_public_metadata(meta_update or {}))
+            if field_updates:
+                allowed = {"result_available", "result_updated_at"}
+                unknown = set(field_updates) - allowed
+                if unknown:
+                    raise ValueError("Unsupported run field updates: " + ", ".join(sorted(unknown)))
+                if (
+                    field_updates.get("result_available", current.result_available)
+                    != current.result_available
+                ):
+                    raise ValueError("result_available is provider-owned")
+                if (
+                    field_updates.get("result_updated_at", current.result_updated_at)
+                    != current.result_updated_at
+                ):
+                    raise ValueError("result_updated_at is provider-owned")
+            terminal = {
+                CanonicalRunStatus.SUCCEEDED,
+                CanonicalRunStatus.FAILED,
+                CanonicalRunStatus.CANCELED,
+            }
+            requested_status = CanonicalRunStatus(status.value)
+            if current.status in terminal and requested_status != current.status:
+                if requested_status not in terminal:
+                    # Completion won the race. A stale control or startup write
+                    # cannot reopen the run or replace its terminal evidence.
+                    return
+                raise StorageIntegrityError("A terminal run outcome cannot be replaced")
+            proposed = replace(
+                current,
+                revision=current.revision + 1,
+                status=CanonicalRunStatus(status.value),
+                finished_at=current.finished_at if finished_at is None else finished_at,
+                error=current.error if error is None else error,
+                metadata=_metadata(public, service, compatibility),
+            )
+            if replace(proposed, revision=current.revision) == current:
+                return
+            try:
+                await self._repository.compare_and_set(proposed, current.revision)
+                return
+            except StorageConflictError:
+                if attempt == 7:
+                    raise
+                await asyncio.sleep(0)
 
     async def get(self, run_id: str) -> RunRecord | None:
         """Read one provider-authorized run and project it to runtime shape.

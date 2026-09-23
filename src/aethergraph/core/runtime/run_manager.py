@@ -1379,7 +1379,7 @@ class RunManager:
 
         Args:
             run_id: Exact run identity to cancel.
-            reason: Exact supported cancellation cause.
+            reason: Supported user_requested, parent_cancelled or timeout cause.
 
         Returns:
             RunRecord | None: Current run record when present, otherwise
@@ -1391,7 +1391,7 @@ class RunManager:
         """
 
         reason = str(reason or "")
-        if reason not in {"user_requested", "parent_cancelled"}:
+        if reason not in {"user_requested", "parent_cancelled", "timeout"}:
             raise ValueError(f"Unsupported cancellation reason: {reason}")
         record: RunRecord | None = None
         if self._store is not None:
@@ -1458,6 +1458,16 @@ class RunManager:
                     else None
                 ),
             )
+
+            # Finalization may have won the status CAS while cancellation was
+            # being requested. Return its evidence without signalling a finished task.
+            current = await self._store.get(run_id)
+            if current is not None and current.status in {
+                RunStatus.succeeded,
+                RunStatus.failed,
+                RunStatus.canceled,
+            }:
+                return current
 
         has_adapter = handle.adapter_kind not in {None, "none"}
         await handle.request_cancel(reason=reason)

@@ -479,8 +479,9 @@ async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["user_requested", "timeout"])
 async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_exits(
-    monkeypatch, dummy_meter
+    monkeypatch, dummy_meter, reason
 ):
     store = InMemoryRunStore()
     reg = UnifiedRegistry()
@@ -521,7 +522,7 @@ async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_
     )
     await asyncio.sleep(0.01)
 
-    await rm.cancel_run(record.run_id)
+    await rm.cancel_run(record.run_id, reason=reason)
     interim = await store.get(record.run_id)
     assert interim is not None
     assert interim.status == RunStatus.cancellation_requested
@@ -530,7 +531,7 @@ async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_
     final = await store.get(record.run_id)
     assert final is not None
     assert final.status == RunStatus.canceled
-    assert final.meta["cancel_reason"] == "user_requested"
+    assert final.meta["cancel_reason"] == reason
     assert final.meta["cancel_backend_kind"] is not None
 
 
