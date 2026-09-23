@@ -360,7 +360,7 @@ class IntegrationIngressCoordinator:
                     for resource in resources
                     if resource.artifact_id is not None
                 ),
-                interaction_id=envelope.choice.interaction_id if envelope.choice else None,
+                interaction_id=resolved.interaction_id if resolved is not None else None,
                 option_ids=envelope.choice.option_ids if envelope.choice else (),
             ),
             extensions={"aethergraph.route_id": route.route_id},

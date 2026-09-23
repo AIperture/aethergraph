@@ -112,8 +112,8 @@ class InteractionResolver:
     ) -> ResolvedInteraction | None:
         """Resolve zero or one exact open interaction for an ingress envelope.
 
-        Choice callbacks require their issued interaction ID. Free text and files
-        select by the durable AG session and reject multiple eligible waits.
+        Explicit responses require their issued interaction ID. Ordinary user
+        messages select by the durable AG session and reject multiple eligible waits.
 
         Examples:
             Resolve a button callback:
@@ -137,11 +137,15 @@ class InteractionResolver:
         Notes:
             Structured root input does not resume a text/file interaction implicitly.
         """
-        if envelope.choice is not None:
+        if envelope.input.type == "interaction.response":
             return await self.resolve_exact(
                 session_id=binding.ag_session_id,
-                interaction_id=envelope.choice.interaction_id,
-                expected_kinds={"approval", "choice"},
+                interaction_id=str(envelope.input.payload["interaction_id"]),
+                expected_kinds=(
+                    {"approval", "choice"}
+                    if envelope.choice is not None
+                    else self._eligible_kinds(envelope)
+                ),
             )
 
         eligible_kinds = self._eligible_kinds(envelope)
