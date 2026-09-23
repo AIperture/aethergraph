@@ -11,7 +11,11 @@ from jsonschema import ValidationError, validate
 
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.resume import ResumeBus
-from aethergraph.services.continuations.continuation import Continuation, ContinuationStatus
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    ContinuationResumeMode,
+    ContinuationStatus,
+)
 
 log = getLogger(__name__)
 
@@ -91,12 +95,14 @@ class ResumeRouter:
             payload: Incoming or synthesized resume payload.
 
         Returns:
-            None: Cooperative or scheduler delivery is complete.
+            None: The response has been retained or delivered as its owner requested.
 
         Notes:
             This method performs no token lookup and never weakens external authorization.
             A cooperative response is retained through revision compare-and-set
             before releasing its waiter. Stale and repeated responses are rejected.
+            Record-only continuations commit the answer without releasing a waiter
+            or enqueueing the original run; their durable owner collects the answer.
         """
         if continuation.closed:
             raise PermissionError("Invalid continuation or token")
@@ -120,7 +126,9 @@ class ResumeRouter:
             **incoming,
         }
         wait_id = continuation.continuation_id
-        if self.waits and wait_id in getattr(self.waits, "_futs", {}):
+        record_only = current.resume_mode == ContinuationResumeMode.RECORD_ONLY
+        has_waiter = self.waits and wait_id in getattr(self.waits, "_futs", {})
+        if record_only or has_waiter:
             try:
                 await self.store.update(
                     replace(
@@ -134,7 +142,7 @@ class ResumeRouter:
                 )
             except Exception:
                 self.logger.exception(
-                    "Cooperative response persistence failed",
+                    "Continuation response persistence failed",
                     extra={
                         "run_id": current.run_id,
                         "node_id": current.node_id,
@@ -143,6 +151,8 @@ class ResumeRouter:
                     },
                 )
                 raise
+            if record_only:
+                return
             scheduled = self.waits.resolve(wait_id, full_payload, cache_if_missing=False)
             if scheduled:
                 self.logger.info(
