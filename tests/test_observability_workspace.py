@@ -439,3 +439,104 @@ async def test_historical_memory_scope_uses_publishing_run_identity(tmp_path):
         )
     finally:
         await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_kind", [None, "session", "run", "trace"])
+async def test_session_agent_state_reads_exact_owner_without_runtime_or_writes(
+    tmp_path, hidden_kind
+):
+    from aethergraph.observability import ObservabilityIdentity
+    from aethergraph.services.agent_state.canonical_facade import CanonicalAgentStateFacade
+
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    scope = StorageScope(
+        project_id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        session_id="s1",
+        run_id="r1",
+        graph_id="g1",
+        agent_id="main",
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="r1",
+            graph_id="g1",
+            kind="taskgraph",
+            status=RunStatus.SUCCEEDED,
+            scope=scope,
+            revision=1,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+    )
+    shared = CanonicalAgentStateFacade(
+        state_store=bundle.state, scope=replace(scope, agent_id=None)
+    )
+    handle = shared.bind(key="work", model=dict, level="session", backend="memory")
+    await handle.commit({"cursor": 7}, reason="test_retained_session")
+    agent = CanonicalAgentStateFacade(state_store=bundle.state, scope=scope)
+    await agent.bind(key="work", model=dict, level="session").commit(
+        {"cursor": "wrong-agent-scope"}, reason="test_distinct_agent"
+    )
+    if hidden_kind:
+        suppression_scope = StorageScope(
+            project_id="project-1",
+            session_id="s1",
+            run_id="r1" if hidden_kind == "run" else None,
+        )
+        await bundle.observations.compare_and_set_scope_management(
+            ObservationScopeManagementRecord(
+                scope_key=f"{hidden_kind}:hidden",
+                scope=suppression_scope,
+                revision=1,
+                updated_at=NOW,
+                hidden=True,
+                trace_id="r1" if hidden_kind == "trace" else None,
+            ),
+            0,
+        )
+    await bundle.close()
+    reader = open_observability_workspace(tmp_path)
+    try:
+        expected = None if hidden_kind else {"cursor": 7}
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key="work")
+            == expected
+        )
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key="missing")
+            is None
+        )
+        assert (
+            await reader.read_session_state(session_id="s2", owner_run_id="r1", key="work") is None
+        )
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="missing", key="work")
+            is None
+        )
+        with pytest.raises(ValueError, match="exact"):
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key=" ")
+    finally:
+        await reader.close()
+    foreign = open_observability_workspace(
+        tmp_path, identity=ObservabilityIdentity(mode="cloud", org_id="org-1", user_id="user-2")
+    )
+    try:
+        assert (
+            await foreign.read_session_state(session_id="s1", owner_run_id="r1", key="work") is None
+        )
+    finally:
+        await foreign.close()
+    bundle = provider.open(request)
+    try:
+        retained = CanonicalAgentStateFacade(
+            state_store=bundle.state, scope=replace(scope, agent_id=None)
+        )
+        handle = retained.bind(key="work", model=dict, level="session", backend="memory")
+        assert await handle.load(force=True) == {"cursor": 7}
+        assert handle.revision == 1
+    finally:
+        await bundle.close()

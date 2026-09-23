@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -565,6 +565,69 @@ class _CanonicalObservabilityFacade:
             if cursor is None:
                 break
         return records
+
+    async def read_session_state(
+        self, *, session_id: str, owner_run_id: str, key: str
+    ) -> dict[str, Any] | None:
+        """Read canonical session Agent state using an authorized run's exact owner.
+
+        Intro:
+            Hydrate the current session-wide mapping through the existing state
+            facade while preserving the retained run's tenant and project scope.
+
+        Examples:
+            Read retained runtime state after the originating run ends:
+            ```python
+            state = await reader.read_session_state(
+                session_id="s1", owner_run_id="r1", key="orchestration",
+            )
+            ```
+
+            Missing state remains absent:
+            ```python
+            assert await reader.read_session_state(
+                session_id="s1", owner_run_id="r1", key="missing",
+            ) is None
+            ```
+
+        Args:
+            session_id: Exact session containing the state.
+            owner_run_id: Retained run whose canonical scope authorizes the read.
+            key: Exact caller-owned state key; no namespace or scope override.
+
+        Returns:
+            dict[str, Any] | None: Detached current state, or None for absent or
+                suppressed state and inaccessible or mismatched owners.
+
+        Notes:
+            This uses the Agent-state facade and its session projection. It never
+            reconstructs state from logs, opens a runtime, or changes a revision.
+            Consumers must apply their own bounded, sanitized domain projection.
+        """
+        from aethergraph.services.agent_state.canonical_facade import (
+            CanonicalAgentStateFacade,
+        )
+
+        if not session_id.strip() or not owner_run_id.strip() or not key.strip():
+            raise ValueError("Session state requires exact session, run and key identities")
+        hidden = await self.list_suppressed_scopes(session_id=session_id)
+        if session_id in hidden.get("session_id", set()) or owner_run_id in (
+            hidden.get("run_id", set()) | hidden.get("trace_id", set())
+        ):
+            return None
+        scope = self._query_scope(session_id=session_id, run_id=owner_run_id)
+        if scope is None:
+            return None
+        bundle = await self._bundle()
+        owner = await bundle.runs.get(scope, owner_run_id)
+        if owner is None or owner.scope.session_id != session_id:
+            return None
+        facade = CanonicalAgentStateFacade(
+            state_store=bundle.state, scope=replace(owner.scope, agent_id=None)
+        )
+        handle = facade.bind(key=key, model=dict, level="session", backend="memory")
+        value = await handle.load(force=True)
+        return value if handle.revision else None
 
     async def read_memory_state(
         self,
