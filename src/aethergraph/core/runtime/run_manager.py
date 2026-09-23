@@ -15,6 +15,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.core.runtime.run_cancellation import (
+    LocalTaskCancellationAdapter,
     RunCancellationHandle,
     RunCancellationRegistry,
     RunCancellationRequestedError,
@@ -772,6 +773,16 @@ class RunManager:
         handle = await self._ensure_cancellation_handle(record.run_id)
 
         try:
+            # Graph functions have no scheduler. Bind cancellation only after the
+            # worker enters this protected lifetime, so pre-start cancellation
+            # still finalizes the durable run and releases its admission slot.
+            if _is_graphfn(target):
+                task = asyncio.current_task()
+                assert task is not None
+                handle.register_adapter(
+                    LocalTaskCancellationAdapter(task), adapter_kind="local_task"
+                )
+            handle.raise_if_cancel_requested()
             result = await run_or_resume_async(
                 target,
                 inputs or {},

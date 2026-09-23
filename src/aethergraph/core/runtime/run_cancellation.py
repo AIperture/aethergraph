@@ -187,6 +187,34 @@ class RunCancellationRegistry:
             return self._handles.pop(run_id, None)
 
 
+class LocalTaskCancellationAdapter:
+    """Cancel one graph function's owning task without interrupting its cleanup twice."""
+
+    def __init__(self, task: asyncio.Task[Any]):
+        self._task = task
+        self._requested = False
+
+    async def request_cancel(self) -> None:
+        if not self._requested:
+            self._requested = True
+            if not self._task.done() and not self._task.cancelling():
+                self._task.cancel()
+
+    async def backend_state(self) -> dict[str, Any]:
+        return {
+            "kind": "local_task",
+            "state": "stopped"
+            if self._task.done()
+            else ("cancellation_requested" if self._requested else "running"),
+        }
+
+    async def wait_stopped(self, timeout_s: float | None = None) -> bool:
+        if self._task is asyncio.current_task():
+            return False
+        done, _ = await asyncio.wait({self._task}, timeout=timeout_s)
+        return bool(done)
+
+
 class LocalSchedulerCancellationAdapter:
     def __init__(self, scheduler: Any, *, run_id: str | None = None):
         self._scheduler = scheduler
