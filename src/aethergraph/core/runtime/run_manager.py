@@ -25,6 +25,7 @@ from aethergraph.core.runtime.run_types import (
     RunAdmissionError,
     RunImportance,
     RunOrigin,
+    RunParent,
     RunRecord,
     RunResult,
     RunStatus,
@@ -690,6 +691,10 @@ class RunManager:
         if session_id is None:
             session_id = rid
 
+        parent_config = (run_config or {}).get("parent_run")
+        parent = RunParent(**dict(parent_config)) if parent_config is not None else None
+        if parent is not None and parent.run_id == rid:
+            raise ValueError("A run cannot be its own parent")
         record = RunRecord(
             run_id=rid,
             graph_id=graph_id,
@@ -706,6 +711,7 @@ class RunManager:
             importance=importance or RunImportance.normal,
             agent_id=agent_id,
             app_id=app_id,
+            parent=parent,
         )
 
         if flow_id:

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -6,7 +7,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
-from aethergraph.core.runtime.run_types import RunAdmissionError, RunOrigin, RunStatus
+from aethergraph.core.runtime.run_types import RunAdmissionError, RunOrigin, RunRecord, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.contracts.scope import StorageScope
@@ -542,6 +543,15 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     class FakeRunManager:
         def __init__(self) -> None:
             self.reasons: list[str] = []
+
+        async def get_record(self, run_id):
+            return RunRecord(
+                run_id=run_id,
+                graph_id="child",
+                kind="graphfn",
+                status=RunStatus.running,
+                started_at=datetime.now(UTC),
+            )
 
         async def cancel_run(
             self,

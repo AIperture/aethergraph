@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -15,6 +15,7 @@ from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
+    RunParent,
     RunRecord,
     RunResult,
     RunStatus,
@@ -57,6 +58,7 @@ _RESERVED_PUBLIC_METADATA = frozenset(
         _DEPRECATED_APP_ID,
         "application_id",
         "client_id",
+        "parent",
     }
 )
 
@@ -951,11 +953,13 @@ def _run_to_canonical(
             agent_id=record.agent_id,
         ),
     )
-    service = {
+    service: dict[str, Any] = {
         "origin": record.origin.value,
         "visibility": record.visibility.value,
         "importance": record.importance.value,
     }
+    if record.parent is not None:
+        service["parent"] = asdict(record.parent)
     compatibility: dict[str, Any] = {}
     if record.app_id is not None:
         compatibility[_DEPRECATED_APP_ID] = {
@@ -1031,6 +1035,7 @@ def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
         importance=RunImportance(str(service.get("importance") or RunImportance.normal.value)),
         agent_id=record.scope.agent_id,
         app_id=_deprecated_app_id(compatibility),
+        parent=RunParent(**dict(service["parent"])) if service.get("parent") is not None else None,
         artifact_count=record.artifact_count,
         first_artifact_at=record.first_artifact_at,
         last_artifact_at=record.last_artifact_at,

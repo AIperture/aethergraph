@@ -60,6 +60,20 @@ class RunAdmissionError(RuntimeError):
         self.details = dict(details or {})
 
 
+@dataclass(frozen=True)
+class RunParent:
+    """Trusted submitting run and session, retained independently of child scope."""
+
+    run_id: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        for name in ("run_id", "session_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip() or value != value.strip():
+                raise ValueError(f"Parent {name} must be an exact non-empty identity")
+
+
 @dataclass
 class RunRecord:
     """
@@ -106,6 +120,7 @@ class RunRecord:
     recent_artifact_ids: list[str] = field(default_factory=list)
     result_available: bool = False
     result_updated_at: datetime | None = None
+    parent: RunParent | None = None
 
     def __item__(self, key: str) -> Any:
         return getattr(self, key)

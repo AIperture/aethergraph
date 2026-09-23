@@ -12,6 +12,7 @@ import pytest
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import (
+    RunParent,
     RunRecord,
     RunStatus,
     SessionKind,
@@ -132,6 +133,7 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
         session_id="session-1",
         app_id="deprecated-app",
         meta={"phase": "start"},
+        parent=RunParent(run_id="parent-run", session_id="parent-session"),
     )
     await store.create(record)
 
@@ -150,6 +152,19 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
     assert projected is not None
     assert projected.app_id == "deprecated-app"
     assert projected.meta == {"phase": "start"}
+    assert projected.parent == record.parent
+    with pytest.raises(ValueError, match="public metadata reserves"):
+        await store.update_status(
+            "run-1",
+            RunStatus.running,
+            meta_update={"parent": {"run_id": "foreign", "session_id": "foreign"}},
+        )
+    with pytest.raises(ValueError, match="Unsupported run field"):
+        await store.update_status(
+            "run-1",
+            RunStatus.running,
+            field_updates={"parent": RunParent("foreign-run", "foreign-session")},
+        )
     with pytest.raises(ValueError, match="public metadata reserves"):
         await store.update_status(
             "run-1",
@@ -188,6 +203,7 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
     updated = await store.get("run-1")
     assert updated is not None
     assert updated.status == RunStatus.waiting
+    assert updated.parent == record.parent
     assert updated.meta["phase"] == "waiting"
     assert updated.artifact_count == 1
     assert updated.recent_artifact_ids == ["content-1"]
