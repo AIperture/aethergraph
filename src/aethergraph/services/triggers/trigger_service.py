@@ -146,6 +146,10 @@ class TriggerServiceImpl(TriggerService):
             request = trig.to_dict()
             if request.get("origin_binding") is None:
                 request.pop("origin_binding", None)
+            # A creation key belongs to the session/Agent, across later runs.
+            # Replay retains the first creator's lineage rather than reparenting
+            # an existing schedule to whichever run observes it next.
+            request.pop("parent_run", None)
             for field in ("created_at", "active", "last_fired_at", "next_fire_at"):
                 request.pop(field)
             digest = sha256(

@@ -410,8 +410,12 @@ def test_canonical_trigger_public_docstrings_follow_strict_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_trigger_origin_survives_reopen_and_exact_creation_replay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_run", [None, "origin-run"])
+async def test_trigger_origin_survives_reopen_and_exact_creation_replay(
+    tmp_path: Path, source_run
+) -> None:
     from aethergraph.contracts.integration import OriginBinding
+    from aethergraph.core.runtime.run_types import RunParent
     from aethergraph.services.triggers.engine import TriggerEngine
     from aethergraph.services.triggers.trigger_facade import TriggerConfig, TriggerFacade
     from tests.test_triggers import FakeRunManager
@@ -424,7 +428,13 @@ async def test_trigger_origin_survives_reopen_and_exact_creation_replay(tmp_path
         external_conversation_id="session-1",
         capability_profile_id="chat/v1",
     )
-    scope = Scope(org_id="org-1", user_id="user-1", session_id="session-1", agent_id="agent-1")
+    scope = Scope(
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session-1",
+        agent_id="agent-1",
+        run_id=source_run,
+    )
     store, _, database, _ = _store(tmp_path)
     service = TriggerServiceImpl(store=store)
     request = dict(
@@ -437,7 +447,10 @@ async def test_trigger_origin_survives_reopen_and_exact_creation_replay(tmp_path
         trigger_service=service, trigger_engine=None, scope=scope, origin_binding=origin
     )
     created = await facade.create(**request)
+    expected_parent = RunParent(source_run, scope.session_id) if source_run else None
+    assert created.parent_run == expected_parent
     assert TriggerRecord.from_dict(created.to_dict()).origin_binding == origin
+    assert TriggerRecord.from_dict(created.to_dict()).parent_run == expected_parent
     await database.close()
 
     store, _, database, _ = _store(tmp_path)
@@ -449,12 +462,16 @@ async def test_trigger_origin_survives_reopen_and_exact_creation_replay(tmp_path
         assert replay.origin_binding == origin
         restored = await store.get(created.trigger_id)
         assert restored.origin_binding == origin
+        assert replay.parent_run == restored.parent_run == expected_parent
         manager = FakeRunManager()
         engine = TriggerEngine(store=store, run_manager=manager)
         await engine._submit(
             restored, inputs=restored.default_inputs, run_id="wake-run", fire_id="fire-1"
         )
-        assert manager.calls[0]["run_config"] == {"origin_binding": origin.model_dump(mode="json")}
+        config = {"origin_binding": origin.model_dump(mode="json")}
+        if source_run:
+            config["parent_run"] = {"run_id": source_run, "session_id": scope.session_id}
+        assert manager.calls[0]["run_config"] == config
         with pytest.raises(StorageConflictError, match="different request"):
             await replace(
                 facade, origin_binding=origin.model_copy(update={"route_id": "other-route"})

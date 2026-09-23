@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.trigger import TriggerKind
+from aethergraph.core.runtime.run_types import RunParent
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
@@ -16,7 +17,8 @@ class TriggerRecord:
 
     Triggers are "scopeful": they remember enough identity / context so that
     runs they spawn share the same behavior for memory, artifacts, and KB
-    as the scope at trigger-creation time (minus run/node IDs).
+    as the scope at trigger-creation time. Each execution gets new run/node
+    identities; the creating run remains a separate parent provenance link.
     """
 
     trigger_id: str
@@ -75,8 +77,17 @@ class TriggerRecord:
     meta: dict[str, Any] = field(default_factory=dict)
 
     origin_binding: OriginBinding | None = None
+    parent_run: RunParent | None = None
 
     def __post_init__(self) -> None:
+        if self.parent_run is not None:
+            if isinstance(self.parent_run, dict):
+                self.parent_run = RunParent(**self.parent_run)
+            if (
+                not isinstance(self.parent_run, RunParent)
+                or self.parent_run.session_id != self.session_id
+            ):
+                raise ValueError("Trigger parent run must match its session")
         if self.origin_binding is not None:
             self.origin_binding = OriginBinding.model_validate(self.origin_binding)
             if self.origin_binding.session_id != self.session_id:
@@ -128,6 +139,7 @@ class TriggerRecord:
             "graph_id": self.graph_id,
             "default_inputs": self.default_inputs,
             "origin": self.origin,
+            "parent_run": asdict(self.parent_run) if self.parent_run is not None else None,
             "origin_binding": None
             if self.origin_binding is None
             else self.origin_binding.model_dump(mode="json"),
@@ -198,6 +210,7 @@ class TriggerRecord:
             graph_id=data.get("graph_id"),
             default_inputs=data.get("default_inputs") or {},
             origin=data.get("origin", "schedule"),
+            parent_run=data.get("parent_run"),
             origin_binding=data.get("origin_binding"),
             kind=data.get("kind", "cron"),
             cron_expr=data.get("cron_expr"),
@@ -235,10 +248,11 @@ class TriggerRecord:
         meta: dict[str, Any] | None = None,
         origin_binding: OriginBinding | None = None,
     ) -> TriggerRecord:
-        """Build a scoped trigger without retaining the originating run or node.
+        """Build a scoped trigger with the originating run retained as its parent.
 
         Retain tenant, session and Agent identity together with an optional
-        immutable channel route for later scheduled executions.
+        immutable channel route for later scheduled executions. A new scheduled
+        run has its own identity and a parent link to the original creating run.
 
         Examples:
             Build an interval schedule:
@@ -281,7 +295,8 @@ class TriggerRecord:
 
         Notes:
             Channel routes never select a different session. Run and node identity
-            are supplied anew when the scheduler admits an execution.
+            are supplied anew when the scheduler admits an execution. When both
+            exist, the creating run/session are retained only as parent provenance.
         """
         return cls(
             trigger_id=trigger_id,
@@ -296,6 +311,9 @@ class TriggerRecord:
             graph_id=graph_id,
             default_inputs=dict(default_inputs or {}),
             origin=origin,
+            parent_run=RunParent(scope.run_id, scope.session_id)
+            if scope.run_id and scope.session_id
+            else None,
             origin_binding=origin_binding,
             kind=kind,
             trigger_name=trigger_name,

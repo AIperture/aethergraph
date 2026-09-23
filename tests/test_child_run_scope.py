@@ -28,6 +28,91 @@ from aethergraph.services.integration.interactions import (
     InteractionResolver,
 )
 from aethergraph.services.runner.facade import RunFacade
+from aethergraph.services.triggers.trigger_facade import TriggerConfig
+
+
+@pytest.mark.asyncio
+async def test_scheduled_child_retains_root_authority_for_later_grandchildren(tmp_path):
+    container = build_default_container(
+        cfg=AppSettings(workspace=str(tmp_path), embed={"enabled": False}), root=str(tmp_path)
+    )
+    captured = {}
+
+    async def grandchild(*, context: NodeContext):
+        return {"value": "grandchild completed"}
+
+    leaf = GraphFunction(
+        name=f"test.scheduled-leaf.{uuid4().hex}", fn=grandchild, inputs=[], outputs=["value"]
+    )
+
+    async def scheduled(*, context: NodeContext):
+        return {
+            "child_id": await context.runner().spawn_run(
+                leaf.name, inputs={}, session_id="grandchild"
+            )
+        }
+
+    wake = GraphFunction(
+        name=f"test.scheduled-wake.{uuid4().hex}", fn=scheduled, inputs=[], outputs=["child_id"]
+    )
+
+    async def child(*, context: NodeContext):
+        captured["child_run_id"] = context.run_id
+        trigger = await context.triggers().create(
+            graph_id=wake.name,
+            default_inputs={},
+            config=TriggerConfig(kind="interval", interval_seconds=10),
+            idempotency_key="child-wakeup",
+        )
+        return {"trigger_id": trigger.trigger_id}
+
+    relay = GraphFunction(
+        name=f"test.scheduled-owner.{uuid4().hex}", fn=child, inputs=[], outputs=["trigger_id"]
+    )
+
+    async def parent(*, context: NodeContext):
+        captured["root_run_id"] = context.run_id
+        child_id = await context.runner().spawn_run(relay.name, inputs={}, session_id="child")
+        _, result = await context.runner().wait_run(child_id, return_outputs=True)
+        return result
+
+    root = GraphFunction(
+        name=f"test.scheduled-root.{uuid4().hex}", fn=parent, inputs=[], outputs=["trigger_id"]
+    )
+    with use_services(container):
+        try:
+            for graph in (leaf, wake, relay):
+                current_registry().register(
+                    nspace="graphfn", name=graph.name, version=graph.version, obj=graph
+                )
+            result = await asyncio.wait_for(run_async(root, {}, session_id="root"), 10)
+            trigger = await container.trigger_store.get(result["trigger_id"])
+            fired = await container.trigger_engine._submit(
+                trigger,
+                inputs={},
+                run_id="scheduled-child-wake",
+                fire_id="fire-1",
+            )
+            ended = await asyncio.wait_for(container.run_manager.wait_run(fired.run_id), 10)
+            assert ended.status is RunStatus.succeeded, ended.error
+            root_facade = RunFacade(container.run_manager, session_id="root")
+            # Both records must remain accessible after the original parent and
+            # child have completed; a shared channel is neither needed nor used.
+            record, output = await root_facade.wait_run(fired.run_id, return_outputs=True)
+            assert record.parent == RunParent(captured["child_run_id"], "child")
+            assert output["child_id"]
+            leaf_record, leaf_output = await asyncio.wait_for(
+                root_facade.wait_run(output["child_id"], return_outputs=True), 10
+            )
+            assert leaf_record.session_id == "grandchild"
+            assert leaf_output == {"value": "grandchild completed"}
+            with pytest.raises(LookupError):
+                await RunFacade(container.run_manager, session_id="unrelated").inspect_run(
+                    leaf_record.run_id
+                )
+        finally:
+            await container.run_manager.close()
+            await container.close_storage()
 
 
 @pytest.mark.asyncio

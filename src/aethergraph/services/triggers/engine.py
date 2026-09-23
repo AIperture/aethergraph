@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 import math
 from typing import TYPE_CHECKING, Any
@@ -300,6 +300,11 @@ class TriggerEngine:
         tags = [f"trigger:{trig.trigger_id}"]
         if fire_id is not None:
             tags.append(f"trigger-fire:{fire_id}")
+        run_config = {}
+        if trig.origin_binding is not None:
+            run_config["origin_binding"] = trig.origin_binding.model_dump(mode="json")
+        if trig.parent_run is not None:
+            run_config["parent_run"] = asdict(trig.parent_run)
         return await self.run_manager.submit_run(
             graph_id=trig.graph_id,
             inputs=inputs,
@@ -307,11 +312,7 @@ class TriggerEngine:
             session_id=trig.session_id,
             identity=identity,
             origin=RunOrigin.schedule,
-            run_config=(
-                {"origin_binding": trig.origin_binding.model_dump(mode="json")}
-                if trig.origin_binding is not None
-                else None
-            ),
+            run_config=run_config or None,
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
             agent_id=trig.agent_id,

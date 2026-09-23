@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Any
 
@@ -725,6 +725,7 @@ def _to_canonical(
             "client_id": trig.client_id,
             "mode": trig.mode,
             "memory_level": trig.memory_level,
+            "parent_run": asdict(trig.parent_run) if trig.parent_run is not None else None,
             "origin_binding": None
             if trig.origin_binding is None
             else trig.origin_binding.model_dump(mode="json"),
@@ -791,6 +792,7 @@ def _to_legacy(record: CanonicalTriggerRecord) -> TriggerRecord:
         agent_id=record.scope.agent_id,
         session_id=record.scope.session_id,
         memory_level=service.get("memory_level"),
+        parent_run=service.get("parent_run"),
         origin_binding=service.get("origin_binding"),
         graph_id=record.graph_id,
         default_inputs=_plain(record.default_inputs),
