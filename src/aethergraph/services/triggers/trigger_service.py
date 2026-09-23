@@ -252,11 +252,19 @@ class TriggerServiceImpl(TriggerService):
         user_id: str | None,
         client_id: str | None,
     ) -> TriggerRecord | None:
-        if org_id is None and user_id is None and client_id is None:
-            return None
         trig = await self.store.get(trigger_id)
         if trig is None:
             return None
+        if org_id is None and user_id is None and client_id is None:
+            # Direct local execution can create an explicitly unscoped trigger.
+            # An empty owner must match that exact tenancy, never act as a
+            # wildcard over records belonging to named tenants or cloud callers.
+            return (
+                trig
+                if trig.mode == "local"
+                and all(value is None for value in (trig.org_id, trig.user_id, trig.client_id))
+                else None
+            )
         if org_id is not None and trig.org_id != org_id:
             return None
         if user_id is not None and trig.user_id != user_id and trig.client_id != user_id:

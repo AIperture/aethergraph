@@ -288,6 +288,8 @@ async def test_service_get_and_cancel_are_owner_bound(tmp_path: Any) -> None:
     trig = _trigger(next_fire_at=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
     await store.create(trig)
     service = TriggerServiceImpl(store=store)
+    assert await service.get(trig.trigger_id, org_id=None, user_id=None, client_id=None) is None
+    assert not await service.cancel(trig.trigger_id, org_id=None, user_id=None, client_id=None)
     assert (
         await service.get(trig.trigger_id, org_id="org-b", user_id="user-b", client_id=None) is None
     )
@@ -295,6 +297,27 @@ async def test_service_get_and_cancel_are_owner_bound(tmp_path: Any) -> None:
         trig.trigger_id, org_id="org-b", user_id="user-b", client_id=None
     )
     assert await service.cancel(trig.trigger_id, org_id="org-a", user_id="user-a", client_id=None)
+
+
+async def test_anonymous_local_creator_can_manage_only_its_exact_unscoped_trigger(
+    tmp_path: Any,
+) -> None:
+    store = _trigger_store(tmp_path / "triggers.db")
+    service = TriggerServiceImpl(store=store)
+    trig = await service.create_from_scope(
+        scope=Scope(session_id="direct-session", mode="local"),
+        graph_id="direct-work",
+        default_inputs={},
+        kind="interval",
+        interval_seconds=10,
+        idempotency_key="direct-wakeup",
+    )
+    owner = dict(org_id=None, user_id=None, client_id=None)
+    assert (await service.get(trig.trigger_id, **owner)).trigger_id == trig.trigger_id
+    assert not await service.cancel(trig.trigger_id, org_id="other", user_id=None, client_id=None)
+    assert await service.cancel(trig.trigger_id, **owner)
+    assert not (await store.get(trig.trigger_id)).active
+    assert await service.delete(trig.trigger_id, **owner)
 
 
 async def test_service_create_list_and_delete_are_owner_bound(tmp_path: Any) -> None:
