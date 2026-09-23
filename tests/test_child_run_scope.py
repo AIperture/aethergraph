@@ -176,10 +176,10 @@ async def test_isolated_child_is_owned_by_parent_session_after_run_completion(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("depth", [1, 2])
-@pytest.mark.parametrize("immediate", [False, True])
+@pytest.mark.parametrize(("immediate", "inline"), [(False, False), (True, False), (False, True)])
 @pytest.mark.parametrize("question_kind", ["text", "choice"])
 async def test_parent_answers_live_isolated_child_after_parent_run_finishes(
-    tmp_path, depth, immediate, question_kind
+    tmp_path, depth, immediate, inline, question_kind
 ):
     container = build_default_container(
         cfg=AppSettings(workspace=str(tmp_path), embed={"enabled": False}), root=str(tmp_path)
@@ -198,6 +198,8 @@ async def test_parent_answers_live_isolated_child_after_parent_run_finishes(
                         ("Titanium", "Titanium")
                     ]
                 questions.put_nowait(event)
+                if inline:
+                    return {"payload": answer_payload}
                 if immediate:
                     selected = await InteractionResolver(
                         container.cont_store,
@@ -277,7 +279,7 @@ async def test_parent_answers_live_isolated_child_after_parent_run_finishes(
                     interaction_id=question.meta["interaction_id"],
                     expected_kinds={"user_input", "choice"},
                 )
-            if not immediate:
+            if not immediate and not inline:
                 resolved = await resolver.resolve_exact(
                     session_id="parent-session",
                     interaction_id=question.meta["interaction_id"],
@@ -308,6 +310,7 @@ async def test_parent_answers_live_isolated_child_after_parent_run_finishes(
             )
             assert len(page.items[0].correlators) == 1
             assert page.items[0].status.value == "resumed"
+            assert all(page.items[0].payload[key] == value for key, value in answer_payload.items())
         finally:
             await container.run_manager.close()
             await container.close_storage()

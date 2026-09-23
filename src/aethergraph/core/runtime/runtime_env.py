@@ -217,6 +217,7 @@ class RuntimeEnv:
 
         services = NodeServices(
             channels=self.channels,
+            resume_router=self.resume_router,
             continuation_store=self.continuation_store,
             artifact_store=artifact_facade,
             wait_registry=self.wait_registry,

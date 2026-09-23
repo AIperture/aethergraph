@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from logging import getLogger
 from typing import Any
@@ -94,9 +95,18 @@ class ResumeRouter:
 
         Notes:
             This method performs no token lookup and never weakens external authorization.
+            A cooperative response is retained through revision compare-and-set
+            before releasing its waiter. Stale and repeated responses are rejected.
         """
         if continuation.closed:
             raise PermissionError("Invalid continuation or token")
+        current = await self.store.get_by_id(
+            continuation.run_id,
+            continuation.node_id,
+            continuation.continuation_id,
+        )
+        if current is None or current.closed or current.revision != continuation.revision:
+            raise PermissionError("Invalid or stale continuation")
         incoming = payload or {}
         if continuation.resume_schema:
             try:
@@ -111,12 +121,29 @@ class ResumeRouter:
         }
         wait_id = continuation.continuation_id
         if self.waits and wait_id in getattr(self.waits, "_futs", {}):
+            try:
+                await self.store.update(
+                    replace(
+                        current,
+                        revision=current.revision + 1,
+                        status=ContinuationStatus.RESUMED,
+                        closed_at=datetime.now(UTC),
+                        payload=full_payload,
+                    ),
+                    expected_revision=current.revision,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Cooperative response persistence failed",
+                    extra={
+                        "run_id": current.run_id,
+                        "node_id": current.node_id,
+                        "continuation_id": wait_id,
+                        "revision": current.revision,
+                    },
+                )
+                raise
             self.waits.resolve(wait_id, full_payload)
-            await self.store.close(
-                continuation,
-                status=ContinuationStatus.RESUMED,
-                closed_at=datetime.now(UTC),
-            )
             self.logger.info(
                 "Resolved cooperative wait for %s/%s", continuation.run_id, continuation.node_id
             )

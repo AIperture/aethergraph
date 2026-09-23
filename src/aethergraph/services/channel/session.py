@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 import logging
 from pathlib import Path, PurePath
 import random
@@ -31,7 +30,6 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.utils.mime_types import mime_type_for_filename
 
 
@@ -1511,23 +1509,9 @@ class ChannelSession:
             res = await self._bus.notify(cont)
             inline = (res or {}).get("payload")
             if inline is not None:
-                try:
-                    self.ctx.services.waits.resolve(cont.continuation_id, inline)
-                except Exception:
-                    logger = logging.getLogger("aethergraph.services.channel.session")
-                    logger.debug("Continuation token %s already resolved inline", cont.token)
-                try:
-                    cont.record = await self._cont_store.close(
-                        cont.record,
-                        status=ContinuationStatus.RESUMED,
-                        closed_at=datetime.now(UTC),
-                    )
-                except Exception:
-                    logger.debug("Failed to delete continuation for token %s", cont.token)
-                    logger.exception("Error occurred while deleting continuation")
-                await span.resume(metadata=wait_meta, response=inline)
-                await span.finish(response=inline, metadata=wait_meta)
-                return inline
+                if self.ctx.services.resume_router is None:
+                    raise RuntimeError("Inline interaction requires the runtime resume router")
+                await self.ctx.services.resume_router.resume_continuation(cont.record, inline)
 
             result = await fut
             await span.resume(metadata=wait_meta, response=result)
