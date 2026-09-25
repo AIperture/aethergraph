@@ -76,6 +76,7 @@ class CatalogChatToolCapabilities(CatalogContract):
         tool_result_continuation: Whether a Tool result can be returned for the
             model to continue the same logical turn.
         parallel_tool_calls: Whether one model turn may emit multiple Tool calls.
+        forced_tool_choice: Whether the API accepts a required or named Tool choice.
 
     Returns:
         CatalogChatToolCapabilities: Immutable validated Chat Tool facts.
@@ -88,6 +89,7 @@ class CatalogChatToolCapabilities(CatalogContract):
     native_tool_calling: CatalogCapabilityState
     tool_result_continuation: CatalogCapabilityState
     parallel_tool_calls: CatalogCapabilityState
+    forced_tool_choice: CatalogCapabilityState = "unknown"
 
 
 class CatalogStructuredOutput(CatalogContract):
@@ -151,6 +153,7 @@ class ModelCatalogEntry(CatalogContract):
     operation: ModelOperation
     endpoint_ids: tuple[str, ...]
     model_id: str | None = Field(default=None, min_length=1, max_length=512)
+    model_ids: tuple[str, ...] | None = None
     model_pattern: str | None = Field(default=None, min_length=1, max_length=1024)
     input_media: CatalogInputMediaCapabilities | None = None
     chat_tools: CatalogChatToolCapabilities | None = None
@@ -210,9 +213,9 @@ class ModelCatalogEntry(CatalogContract):
         """Require one model selector and evidence for positive capabilities.
 
         Intro:
-            Entries use either an exact model ID or a full-match regular
-            expression. Native Tool-search support requires verified URL
-            evidence and unique native modes.
+            Entries use one exact model ID, an explicit set of model IDs, or a
+            full-match regular expression. Native Tool-search support requires
+            verified URL evidence and unique native modes.
 
         Examples:
             Validate an exact entry:
@@ -239,8 +242,20 @@ class ModelCatalogEntry(CatalogContract):
             applied with `fullmatch` by the loader.
         """
 
-        if (self.model_id is None) == (self.model_pattern is None):
-            raise ValueError("catalog entry requires exactly one model_id or model_pattern")
+        if (
+            sum(
+                selector is not None
+                for selector in (self.model_id, self.model_ids, self.model_pattern)
+            )
+            != 1
+        ):
+            raise ValueError("catalog entry requires exactly one model selector")
+        if self.model_ids is not None and (
+            not self.model_ids
+            or any(not model_id or len(model_id) > 512 for model_id in self.model_ids)
+            or len(set(self.model_ids)) != len(self.model_ids)
+        ):
+            raise ValueError("catalog model_ids must be non-empty and unique")
         if self.model_pattern is not None:
             try:
                 re.compile(self.model_pattern)
@@ -274,7 +289,9 @@ class ModelCatalogEntry(CatalogContract):
             raise ValueError("catalog capability domain does not match operation")
         positive_capability = bool(self.native_tool_search)
         if self.input_media is not None:
-            positive_capability = positive_capability or "supported" in self.input_media.model_dump().values()
+            positive_capability = (
+                positive_capability or "supported" in self.input_media.model_dump().values()
+            )
         if self.chat_tools is not None:
             positive_capability = positive_capability or "supported" in {
                 self.chat_tools.native_tool_calling,
@@ -316,7 +333,7 @@ class ModelCatalogEntry(CatalogContract):
         """Return whether this entry selects one exact provider model ID.
 
         Intro:
-            Exact entries compare directly. Pattern entries use full regular
+            Exact IDs compare directly. Pattern entries use full regular
             expression matching so partial names cannot inherit capability.
 
         Examples:
@@ -344,6 +361,8 @@ class ModelCatalogEntry(CatalogContract):
         candidate = str(model_id or "").strip()
         if self.model_id is not None:
             return candidate == self.model_id
+        if self.model_ids is not None:
+            return candidate in self.model_ids
         return re.fullmatch(self.model_pattern or r"(?!)", candidate) is not None
 
     def declares(self, capability: CatalogCapability) -> bool:

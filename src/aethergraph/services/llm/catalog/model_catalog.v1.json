@@ -1,6 +1,6 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 9,
+  "catalog_revision": 10,
   "entries": [
     {
       "catalog_key": "openai/gpt-5.2-server-context-compaction/v7",
@@ -846,6 +846,412 @@
       ],
       "verified_at": "2026-09-13",
       "catalog_revision": 8,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/gpt-6-responses-chat-tools/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna"
+      ],
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://developers.openai.com/api/docs/guides/latest-model"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/gpt-5.6-cyber-responses-chat-tools/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-5.6-cyber"
+      ],
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "unknown"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/new-native-tool-search/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-cyber"
+      ],
+      "native_tool_search": [
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "none",
+          "result_limit_behavior": "post_validated",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "selection_owner": "provider",
+          "tool_representation": "full_definitions",
+          "inventory_timing": "request",
+          "path_transport": "native_group"
+        },
+        {
+          "mode": "native_client",
+          "replay_requirement": "previous_response",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "selection_owner": "application",
+          "tool_representation": "search_schema_manifest",
+          "inventory_timing": "search",
+          "path_transport": "manifest"
+        }
+      ],
+      "sources": [
+        "https://developers.openai.com/api/docs/guides/tools-tool-search",
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/new-structured-output/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-cyber",
+        "gpt-5.5-pro"
+      ],
+      "structured_output": {
+        "native_strict_schema": true,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "openai_model_pages/2026"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
+        "https://developers.openai.com/api/docs/models/gpt-5.5-pro"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/new-image-input/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-cyber",
+        "gpt-5.5-pro"
+      ],
+      "input_media": {
+        "image_input": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
+        "https://developers.openai.com/api/docs/models/gpt-5.5-pro"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/gpt-6-server-context-compaction/v10",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": [
+        "openai_responses"
+      ],
+      "model_ids": [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna"
+      ],
+      "server_context_compaction": {
+        "state": "supported",
+        "protocol": "responses.context_management.compact",
+        "custom_instructions": "unsupported",
+        "maturity": "stable"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/guides/compaction",
+        "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-6-luna"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/current-forced-choice-unsupported-chat-tools/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+        "claude-opus-5-5"
+      ],
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "unknown",
+        "forced_tool_choice": "unsupported"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1",
+        "https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/recent-chat-tools/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "claude-opus-4-5",
+        "claude-opus-4-5-20251101",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "unknown"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/models/overview",
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/recent-native-tool-search/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+        "claude-opus-4-5-20251101",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "native_tool_search": [
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "provider_fixed",
+          "max_results": 5,
+          "protocol_version": "tool_search_tool_bm25_20251119",
+          "selection_owner": "provider",
+          "tool_representation": "full_definitions",
+          "inventory_timing": "request",
+          "path_transport": "metadata"
+        },
+        {
+          "mode": "native_client",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "messages.tool_reference",
+          "selection_owner": "application",
+          "tool_representation": "search_schema_manifest",
+          "inventory_timing": "search",
+          "path_transport": "manifest"
+        }
+      ],
+      "sources": [
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/recent-structured-output/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+        "claude-opus-5-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "claude-opus-4-5",
+        "claude-opus-4-5-20251101",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "structured_output": {
+        "native_strict_schema": true,
+        "native_schema": true,
+        "json_object": false,
+        "prompt_json": true,
+        "capability_source": "anthropic_output_config_format"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/current-image-input/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "input_media": {
+        "image_input": "supported"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/models/overview"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/new-threshold-compaction/v10",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": [
+        "anthropic_messages"
+      ],
+      "model_ids": [
+        "claude-opus-5-5",
+        "claude-mythos-preview"
+      ],
+      "server_context_compaction": {
+        "state": "supported",
+        "protocol": "compact-2026-01-12",
+        "minimum_trigger_tokens": 50000,
+        "custom_instructions": "supported",
+        "maturity": "beta"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+      ],
+      "verified_at": "2026-09-25",
+      "catalog_revision": 10,
       "evidence_status": "verified",
       "priority": 200
     }

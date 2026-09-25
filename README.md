@@ -32,7 +32,7 @@ python -m pip install "aethergraph[discord]"
 Pin alpha releases in deployed applications:
 
 ```text
-aethergraph==0.1.0a22
+aethergraph==0.1.0a23
 ```
 
 ## Quickstart

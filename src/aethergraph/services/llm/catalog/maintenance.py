@@ -6,9 +6,14 @@ import argparse
 from collections.abc import Sequence
 from datetime import date
 import json
+from typing import get_args
 
-from .loader import catalog_digest, load_model_catalog
-from .models import ModelCatalog
+from .loader import (
+    catalog_digest,
+    load_model_catalog,
+    resolve_model_catalog_capability_entry,
+)
+from .models import CatalogCapability, ModelCatalog
 
 
 def validate_catalog(
@@ -99,6 +104,71 @@ def catalog_report(catalog: ModelCatalog) -> dict[str, object]:
     }
 
 
+def model_coverage_report(
+    catalog: ModelCatalog,
+    *,
+    provider_id: str,
+    endpoint_id: str,
+    model_ids: Sequence[str],
+) -> dict[str, object]:
+    """Report exact catalog coverage for named provider models.
+
+    Intro:
+        Resolve every capability through the production catalog path so a new
+        provider model can be reviewed without editing a second inventory.
+
+    Examples:
+        Inspect a new OpenAI model:
+            ```python
+            report = model_coverage_report(
+                load_model_catalog(), provider_id="openai",
+                endpoint_id="openai_responses", model_ids=("gpt-6-luna",),
+            )
+            ```
+
+    Args:
+        catalog: Validated production catalog.
+        provider_id: Registered provider identity.
+        endpoint_id: Registered endpoint identity.
+        model_ids: Exact provider model IDs to inspect.
+
+    Returns:
+        dict[str, object]: Capability keys and evidence for each model.
+
+    Notes:
+        Unknown capabilities are reported as null; discovery does not grant support.
+    """
+
+    models: dict[str, object] = {}
+    for model_id in model_ids:
+        capabilities: dict[str, object] = {}
+        for capability in get_args(CatalogCapability):
+            entry = resolve_model_catalog_capability_entry(
+                provider_id,
+                model_id,
+                "chat",
+                endpoint_id,
+                capability=capability,
+                catalog=catalog,
+            )
+            capabilities[capability] = (
+                {
+                    "catalog_key": entry.catalog_key,
+                    "sources": [str(source) for source in entry.sources],
+                    "verified_at": entry.verified_at.isoformat(),
+                }
+                if entry is not None
+                else None
+            )
+        models[model_id] = capabilities
+    return {
+        "provider_id": provider_id,
+        "endpoint_id": endpoint_id,
+        "catalog_digest": catalog_digest(catalog),
+        "models": models,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate or report the packaged catalog through production APIs.
 
@@ -129,12 +199,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
 
     parser = argparse.ArgumentParser(prog="python -m aethergraph.services.llm.catalog")
-    parser.add_argument("command", choices=("validate", "report"))
+    parser.add_argument("command", choices=("validate", "report", "coverage"))
+    parser.add_argument("--provider")
+    parser.add_argument("--endpoint")
+    parser.add_argument("--models", nargs="+")
     args = parser.parse_args(argv)
+    if args.command == "coverage" and not (args.provider and args.endpoint and args.models):
+        parser.error("coverage requires --provider, --endpoint, and --models")
     catalog = load_model_catalog()
     diagnostics = validate_catalog(catalog)
     if args.command == "report":
         print(json.dumps(catalog_report(catalog), sort_keys=True))
+    elif args.command == "coverage":
+        print(
+            json.dumps(
+                model_coverage_report(
+                    catalog,
+                    provider_id=args.provider,
+                    endpoint_id=args.endpoint,
+                    model_ids=args.models,
+                ),
+                sort_keys=True,
+            )
+        )
     elif diagnostics:
         print("\n".join(diagnostics))
     else:
@@ -142,4 +229,4 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1 if diagnostics else 0
 
 
-__all__ = ["catalog_report", "main", "validate_catalog"]
+__all__ = ["catalog_report", "main", "model_coverage_report", "validate_catalog"]

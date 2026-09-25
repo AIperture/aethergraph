@@ -568,6 +568,26 @@ async def test_anthropic_does_not_silently_weaken_required_tool_choice() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_catalog_rejects_forced_choice_before_transport() -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-opus-5-5",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient({})
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMToolCallCapabilityError, match="forced_tool_choice"):
+        await client.chat(
+            [{"role": "user", "content": "look up"}],
+            tool_request=_native_tool_request(max_calls=1),
+        )
+
+    assert fake_http.last_json is None
+
+
+@pytest.mark.asyncio
 async def test_anthropic_adaptive_thinking_uses_current_effort_wire() -> None:
     payload = {
         "id": "msg_adaptive",
@@ -2122,7 +2142,10 @@ async def test_openai_image_generation_survives_responses_chat_extraction() -> N
     )
     image_client = client._image_client_for_compatibility()
     from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
-    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
+
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(
+        text_to_image="supported"
+    )
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
@@ -2156,7 +2179,10 @@ async def test_azure_image_generation_survives_chat_adapter_extraction() -> None
     )
     image_client = client._image_client_for_compatibility()
     from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
-    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
+
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(
+        text_to_image="supported"
+    )
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
@@ -2204,7 +2230,10 @@ async def test_gemini_image_generation_survives_chat_adapter_extraction() -> Non
     )
     image_client = client._image_client_for_compatibility()
     from aethergraph.services.llm.profiles import ImageGenerationCapabilityOverrides
-    image_client.capability_overrides = ImageGenerationCapabilityOverrides(text_to_image="supported")
+
+    image_client.capability_overrides = ImageGenerationCapabilityOverrides(
+        text_to_image="supported"
+    )
     image_client._client = fake_http  # type: ignore[attr-defined,assignment]
     image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
