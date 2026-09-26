@@ -354,7 +354,12 @@ class _CanonicalObservabilityFacade:
             cursor = page.next_cursor
 
     async def page_runs(
-        self, *, limit: int = 100, cursor: str | None = None, session_id: str | None = None
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        session_id: str | None = None,
+        parent_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Read one provider-cursor page without offset replay or a history ceiling.
 
@@ -374,6 +379,8 @@ class _CanonicalObservabilityFacade:
             limit: Provider page size, at most 1,000.
             cursor: Opaque provider continuation for the same scope.
             session_id: Optional exact session constraint applied by storage.
+            parent_run_id: Optional exact accessible parent; includes children in
+                distinct sessions while preserving the caller's owner scope.
         Returns:
             dict: Stable run mappings and an opaque next_cursor.
         Notes:
@@ -384,7 +391,15 @@ class _CanonicalObservabilityFacade:
         scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
         if scope is None:
             return {"items": [], "next_cursor": None}
-        page = await bundle.runs.query(RunQuery(scope=scope, page=page_request))
+        if parent_run_id is not None and await self.get_run(parent_run_id) is None:
+            return {"items": [], "next_cursor": None}
+        page = await bundle.runs.query(
+            RunQuery(
+                scope=scope,
+                page=page_request,
+                parent_run_id=parent_run_id,
+            )
+        )
         return {
             "items": [asdict(project_canonical_run_record(record)) for record in page.items],
             "next_cursor": page.next_cursor,

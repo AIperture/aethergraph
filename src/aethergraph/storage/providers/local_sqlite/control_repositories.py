@@ -31,7 +31,7 @@ from ...contracts import (
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
-_CONTROL_COMPONENT_VERSION = 1
+_CONTROL_COMPONENT_VERSION = 2
 _CREATE_RUNS = """
 CREATE TABLE local_runs (
     run_id TEXT PRIMARY KEY,
@@ -58,7 +58,10 @@ CREATE TABLE local_runs (
     recent_artifact_ids_json TEXT NOT NULL,
     result_available INTEGER NOT NULL CHECK (result_available IN (0, 1)),
     result_updated_at TEXT,
-    schema_version INTEGER NOT NULL CHECK (schema_version > 0)
+    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+    parent_run_id TEXT,
+    parent_session_id TEXT,
+    CHECK ((parent_run_id IS NULL) = (parent_session_id IS NULL))
 )
 """
 _CREATE_RUN_PROJECT_INDEX = """
@@ -81,6 +84,31 @@ _CREATE_RUN_KIND_INDEX = """
 CREATE INDEX ix_local_runs_kind_started
 ON local_runs(kind, started_at DESC, run_id DESC)
 """
+_CREATE_RUN_PARENT_INDEX = """
+CREATE INDEX ix_local_runs_parent_started
+ON local_runs(parent_run_id, started_at DESC, run_id DESC)
+"""
+_MIGRATE_CONTROL_V1_TO_V2 = (
+    "CREATE TEMP TABLE control_parent_migration_guard(valid INTEGER NOT NULL CHECK(valid = 1))",
+    "INSERT INTO control_parent_migration_guard SELECT CASE "
+    "WHEN json_type(metadata_json, '$.service_context.parent') IS NULL "
+    "OR json_type(metadata_json, '$.service_context.parent') = 'null' THEN 1 "
+    "WHEN json_type(metadata_json, '$.service_context.parent.run_id') = 'text' "
+    "AND json_type(metadata_json, '$.service_context.parent.session_id') = 'text' "
+    "AND length(trim(json_extract(metadata_json, '$.service_context.parent.run_id'))) > 0 "
+    "AND length(trim(json_extract(metadata_json, '$.service_context.parent.session_id'))) > 0 "
+    "AND json_extract(metadata_json, '$.service_context.parent.run_id') != run_id "
+    "THEN 1 ELSE 0 END FROM local_runs",
+    "DROP TABLE control_parent_migration_guard",
+    "ALTER TABLE local_runs ADD COLUMN parent_run_id TEXT",
+    "ALTER TABLE local_runs ADD COLUMN parent_session_id TEXT "
+    "CHECK ((parent_run_id IS NULL) = (parent_session_id IS NULL))",
+    "UPDATE local_runs SET "
+    "parent_run_id = json_extract(metadata_json, '$.service_context.parent.run_id'), "
+    "parent_session_id = json_extract(metadata_json, '$.service_context.parent.session_id'), "
+    "metadata_json = json_remove(metadata_json, '$.service_context.parent')",
+    _CREATE_RUN_PARENT_INDEX,
+)
 _CREATE_RUN_ARTIFACT_OCCURRENCES = """
 CREATE TABLE local_run_artifact_occurrences (
     run_id TEXT NOT NULL REFERENCES local_runs(run_id) ON DELETE CASCADE,
@@ -327,11 +355,19 @@ class LocalRunRepository:
             placeholders = ",".join("?" for _ in query.kinds)
             clauses.append(f"r.kind IN ({placeholders})")
             values.extend(query.kinds)
+        if query.parent_run_id is not None:
+            clauses.append("r.parent_run_id = ?")
+            values.append(query.parent_run_id)
         fingerprint = _fingerprint(
             "run",
             _scope_json(query.scope),
             _json(tuple(status.value for status in query.statuses)),
             _json(query.kinds),
+            *(
+                ()
+                if query.parent_run_id is None
+                else (_json({"parent_run_id": query.parent_run_id}),)
+            ),
         )
         if query.page.cursor is not None:
             timestamp, identity = _decode_cursor(query.page.cursor, fingerprint)
@@ -969,6 +1005,12 @@ class LocalSessionRepository:
 def _install(database: LocalSQLiteDatabase) -> None:
     if database.role is not LocalDatabaseRole.CONTROL:
         raise StorageConfigurationError("Local control repositories require control database")
+    database.migrate_component(
+        name="control",
+        from_version=1,
+        to_version=_CONTROL_COMPONENT_VERSION,
+        statements=_MIGRATE_CONTROL_V1_TO_V2,
+    )
     database.install_component(
         name="control",
         version=_CONTROL_COMPONENT_VERSION,
@@ -979,6 +1021,7 @@ def _install(database: LocalSQLiteDatabase) -> None:
             _CREATE_RUN_GRAPH_INDEX,
             _CREATE_RUN_STATUS_INDEX,
             _CREATE_RUN_KIND_INDEX,
+            _CREATE_RUN_PARENT_INDEX,
             _CREATE_RUN_ARTIFACT_OCCURRENCES,
             _CREATE_RUN_RESULTS,
             _CREATE_SESSIONS,
@@ -1106,8 +1149,8 @@ def _insert_run(connection: sqlite3.Connection, record: RunRecord) -> None:
             node_id, agent_id, scope_key, kind, status, revision, started_at,
             finished_at, tags_json, error, metadata_json, artifact_count,
             first_artifact_at, last_artifact_at, recent_artifact_ids_json,
-            result_available, result_updated_at, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            result_available, result_updated_at, schema_version, parent_run_id, parent_session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _run_values(record),
     )
@@ -1123,7 +1166,7 @@ def _update_run(connection: sqlite3.Connection, record: RunRecord) -> None:
             status = ?, revision = ?, started_at = ?, finished_at = ?, tags_json = ?,
             error = ?, metadata_json = ?, artifact_count = ?, first_artifact_at = ?,
             last_artifact_at = ?, recent_artifact_ids_json = ?, result_available = ?,
-            result_updated_at = ?, schema_version = ?
+            result_updated_at = ?, schema_version = ?, parent_run_id = ?, parent_session_id = ?
         WHERE run_id = ?
         """,
         (*values[1:], values[0]),
@@ -1157,6 +1200,8 @@ def _run_values(record: RunRecord) -> tuple[object, ...]:
         int(record.result_available),
         record.result_updated_at.isoformat() if record.result_updated_at else None,
         record.schema_version,
+        record.parent_run_id,
+        record.parent_session_id,
     )
 
 
@@ -1174,6 +1219,8 @@ def _run(row: sqlite3.Row) -> RunRecord:
             tags=tuple(_json_list(row["tags_json"], "run tags")),
             error=row["error"],
             metadata=_json_mapping(row["metadata_json"], "run metadata"),
+            parent_run_id=row["parent_run_id"],
+            parent_session_id=row["parent_session_id"],
             artifact_count=int(row["artifact_count"]),
             first_artifact_at=_optional_time(row["first_artifact_at"]),
             last_artifact_at=_optional_time(row["last_artifact_at"]),
@@ -1213,6 +1260,8 @@ def _run_immutable(record: RunRecord) -> tuple[object, ...]:
         record.graph_id,
         record.kind,
         record.scope,
+        record.parent_run_id,
+        record.parent_session_id,
         record.started_at,
         record.artifact_count,
         record.first_artifact_at,

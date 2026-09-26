@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -958,8 +958,6 @@ def _run_to_canonical(
         "visibility": record.visibility.value,
         "importance": record.importance.value,
     }
-    if record.parent is not None:
-        service["parent"] = asdict(record.parent)
     compatibility: dict[str, Any] = {}
     if record.app_id is not None:
         compatibility[_DEPRECATED_APP_ID] = {
@@ -979,6 +977,8 @@ def _run_to_canonical(
         tags=tuple(record.tags),
         error=record.error,
         metadata=_metadata(_run_public_metadata(record.meta), service, compatibility),
+        parent_run_id=record.parent.run_id if record.parent is not None else None,
+        parent_session_id=record.parent.session_id if record.parent is not None else None,
         artifact_count=record.artifact_count,
         first_artifact_at=record.first_artifact_at,
         last_artifact_at=record.last_artifact_at,
@@ -1035,7 +1035,11 @@ def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
         importance=RunImportance(str(service.get("importance") or RunImportance.normal.value)),
         agent_id=record.scope.agent_id,
         app_id=_deprecated_app_id(compatibility),
-        parent=RunParent(**dict(service["parent"])) if service.get("parent") is not None else None,
+        parent=(
+            RunParent(record.parent_run_id, record.parent_session_id)
+            if record.parent_run_id is not None
+            else None
+        ),
         artifact_count=record.artifact_count,
         first_artifact_at=record.first_artifact_at,
         last_artifact_at=record.last_artifact_at,
@@ -1118,6 +1122,8 @@ def _metadata_parts(
     if not isinstance(compatibility, dict):
         raise ValueError(f"Canonical {label} compatibility metadata is malformed")
     if label == "run":
+        if "parent" in service:
+            raise ValueError("Canonical run parent metadata requires storage migration")
         public = _run_public_metadata(public)
     return public, service, compatibility
 
