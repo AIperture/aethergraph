@@ -454,7 +454,17 @@ class ChannelSession:
         *,
         tool_call_id: str,
         tool_name: str,
-        status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
+        status: Literal[
+            "started",
+            "running",
+            "waiting",
+            "completed",
+            "failed",
+            "canceled",
+            "dispatched",
+            "queued",
+            "submission_unknown",
+        ],
         message: str | None = None,
         error: dict[str, JsonValue] | None = None,
         channel: str | None = None,
@@ -499,6 +509,8 @@ class ChannelSession:
         Notes:
             This method reports execution activity only. Tool results remain in the
             Engine Ledger and authored user messages retain their existing path.
+            Dispatched, queued and submission_unknown are settled admission
+            receipts; later worker progress does not reopen the caller activity.
         """
         normalized_call_id = str(tool_call_id or "").strip()
         normalized_tool_name = str(tool_name or "").strip()

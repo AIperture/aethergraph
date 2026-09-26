@@ -414,8 +414,10 @@ async def test_semantic_adapter_preserves_structured_output_upsert_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "dispatched", "queued", "submission_unknown"])
 async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
     tmp_path,
+    status,
 ) -> None:
     event_log = make_semantic_event_store()
     store = event_log
@@ -431,7 +433,7 @@ async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
             rich={
                 "tool_call_id": "call-1",
                 "tool_name": "inspect_project",
-                "status": "completed",
+                "status": status,
                 "message": "Project inspected.",
             },
             meta=_meta(),
@@ -447,7 +449,7 @@ async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
     assert event.kind == SemanticEventKind.TOOL_ACTIVITY
     assert isinstance(event.payload, ToolActivityPayload)
     assert event.payload.tool_call_id == "call-1"
-    assert event.payload.status == "completed"
+    assert event.payload.status == status
     assert event.extensions["aethergraph.upsert_key"] == "tool:call-1"
     await event_log.close()
 
