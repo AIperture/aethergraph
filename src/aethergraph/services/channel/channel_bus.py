@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import warnings
-
 from aethergraph.contracts.services.channel import (
     Button,
     ChannelAdapter,
     ChannelRoutingError,
     OutEvent,
 )
+from aethergraph.core.runtime.run_types import RunParent
 from aethergraph.services.channel.choices import build_choice_options, prompt_choices_from_prompt
-from aethergraph.services.continuations.continuation import Correlator
 
 
 class ChannelBus:
@@ -17,19 +15,13 @@ class ChannelBus:
     Transport layer:
       - publish(event) : deliver an OutEvent unchanged to its exact adapter
       - notify(cont)   : raise a prompt from a Continuation; inline-resume if adapter can read input
-      - peek_correlator(channel_key): ask adapter for a thread hint (optional)
-    Optionally aware of:
-      - resume_router  : used for inline resume (console/local-web)
-      - store          : used to bind transport correlators to internal continuations
+    Continuation ownership stays outside delivery. Public interaction identities
+    are persisted before notification; transport responses never rewrite them.
     """
 
     def __init__(
         self,
         adapters: dict[str, ChannelAdapter],
-        *,
-        logger=None,
-        resume_router=None,
-        store=None,
     ):
         """Create an exact-delivery Channel bus.
 
@@ -39,16 +31,13 @@ class ChannelBus:
             bus = ChannelBus({"ui": ui_adapter, "console": console_adapter})
             ```
 
-            Attach continuation services:
+            Register an additional adapter:
             ```python
-            bus = ChannelBus(adapters, resume_router=router, store=store)
+            bus.register_adapter("endpoint", endpoint_adapter)
             ```
 
         Args:
             adapters: Adapter mapping keyed by exact channel prefix.
-            logger: Optional Channel logger.
-            resume_router: Optional continuation resume router.
-            store: Optional continuation store.
 
         Returns:
             None.
@@ -57,9 +46,6 @@ class ChannelBus:
             The bus owns neither a default address nor an alias registry.
         """
         self.adapters = dict(adapters)
-        self.logger = logger
-        self.resume_router = resume_router
-        self.store = store
 
     # ---- admin ----
     def register_adapter(self, prefix: str, adapter: ChannelAdapter) -> None:
@@ -83,30 +69,6 @@ class ChannelBus:
                 ),
             )
         return self.adapters[prefix]
-
-    def _warn(self, msg: str) -> None:
-        if self.logger:
-            self.logger.warning(msg)
-        else:
-            warnings.warn(msg, stacklevel=2)
-
-    async def _bind_correlator_if_any(
-        self,
-        send_result: dict | None,
-        *,
-        continuation,
-    ):
-        if not self.store or not send_result or continuation is None:
-            return
-        corr = send_result.get("correlator")
-        if isinstance(corr, Correlator):
-            try:
-                record = getattr(continuation, "record", continuation)
-                updated = await self.store.bind_correlator(continuation=record, corr=corr)
-                if hasattr(continuation, "record"):
-                    continuation.record = updated
-            except Exception as e:
-                self._warn(f"Failed to bind correlator: {e}")
 
     # ---- core send path ----
     async def publish(self, event: OutEvent) -> dict | None:
@@ -147,16 +109,37 @@ class ChannelBus:
         return res
 
     # ---- continuation-aware notify (used by ChannelSession.ask_*) ----
-    async def notify(self, continuation) -> dict | None:
-        """
-        Present a prompt for a Continuation, returning either:
-        - {"payload": {...}} for inline adapters (console/local-web), or
-        - {"correlator": Correlator(...)} for push-only adapters (Slack/Telegram).
-        Never calls resume_router here; ChannelSession owns the wait/inline short-circuit.
+    async def notify(self, continuation, *, audience: RunParent | None = None) -> dict | None:
+        """Present a stored question in its owner's or an explicit parent's conversation.
+
+        Publication never mutates continuation ownership or resolves its answer.
+        An explicit audience changes conversation grouping while retaining the
+        exact question owner in event metadata.
+
+        Examples:
+            Publish in the question owner's conversation:
+            ```python
+            receipt = await bus.notify(question)
+            ```
+            Publish a child's question to its trusted submitting parent:
+            ```python
+            receipt = await bus.notify(question, audience=child_run.parent)
+            ```
+
+        Args:
+            continuation: Stored question or its issuance envelope.
+            audience: Trusted parent run/session selected by the lifecycle owner.
+
+        Returns:
+            dict | None: Inline payload or push-delivery receipt from the adapter.
+
+        Notes:
+            The caller validates parent lineage before supplying an audience.
+            Response authorization continues to use the stored question owner.
         """
         ch = continuation.channel
         kind = continuation.kind
-        prompt = continuation.prompt
+        prompt = continuation.interaction_prompt
 
         continuation_payload = getattr(continuation, "payload", None)
         interaction_id = (
@@ -204,6 +187,16 @@ class ChannelBus:
         if graph_id is not None:
             meta.setdefault("graph_id", graph_id)
 
+        if audience is not None:
+            meta["interaction_owner"] = {
+                "continuation_id": continuation.continuation_id,
+                "session_id": session_id,
+                "run_id": run_id,
+                "node_id": node_id,
+            }
+            meta["session_id"] = audience.session_id
+            meta["run_id"] = audience.run_id
+
         # Shape event
         if kind == "user_input":
             silent = False
@@ -222,7 +215,6 @@ class ChannelBus:
             txt = txt or "Please reply."
             meta["_prompt"] = True
             event = OutEvent(type="session.need_input", channel=ch, text=txt, meta=meta)
-            needed_cap = "input"
 
         elif kind in ("approval", "choice"):
             choices = []
@@ -245,58 +237,14 @@ class ChannelBus:
             event = OutEvent(
                 type="session.need_approval", channel=ch, text=txt, buttons=btns, meta=meta
             )
-            needed_cap = "buttons"
 
         elif kind in ("user_files", "user_input_or_files"):
             # Console has no uploads; treat as text input. Other adapters may enhance later.
             txt = prompt if isinstance(prompt, str) else (prompt or "Please reply.")
             meta["_prompt"] = True
             event = OutEvent(type="session.need_input", channel=ch, text=txt, meta=meta)
-            needed_cap = "input"
 
         else:
             txt = str(prompt) if isinstance(prompt, str) else "Waiting…"
             event = OutEvent(type="session.waiting", channel=ch, text=txt, meta=meta)
-            adapter = self._pick(ch)
-            res = await adapter.send(event)
-            await self._bind_correlator_if_any(
-                res,
-                continuation=continuation,
-            )
-            return res
-
-        # Inline vs push-only
-        adapter = self._pick(ch)
-        caps = getattr(adapter, "capabilities", set())
-
-        force_push = False
-        if isinstance(prompt, dict):
-            force_push = bool(prompt.get("_force_push"))
-        if (needed_cap in caps) and not force_push:
-            # Inline path
-            res = await adapter.send(event)
-            await self._bind_correlator_if_any(
-                res,
-                continuation=continuation,
-            )
-            return res
-
-        # Push-only path
-        res = await adapter.send(event)
-        await self._bind_correlator_if_any(
-            res,
-            continuation=continuation,
-        )
-        return res
-
-    # ---- optional: ask adapter for correlator/“thread” without sending ----
-    async def peek_correlator(self, channel_key: str) -> Correlator | None:
-        adapter = self._pick(channel_key)
-        scheme = self._prefix(channel_key)
-        thread_ts = None
-        if hasattr(adapter, "peek_thread"):
-            try:
-                thread_ts = await adapter.peek_thread(channel_key)
-            except Exception:
-                thread_ts = None
-        return Correlator(scheme=scheme, channel=channel_key, thread=thread_ts, message=None)
+        return await self._pick(ch).send(event)

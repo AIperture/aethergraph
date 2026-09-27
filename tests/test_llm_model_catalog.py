@@ -34,7 +34,11 @@ from aethergraph.services.llm.catalog import (
     resolve_model_catalog_entry,
     validate_catalog,
 )
-from aethergraph.services.llm.catalog.maintenance import catalog_report, main
+from aethergraph.services.llm.catalog.maintenance import (
+    catalog_report,
+    main,
+    model_coverage_report,
+)
 from aethergraph.services.llm.compat import chat_profile_from_legacy
 from aethergraph.services.llm.profiles import ChatCapabilityOverrides
 from aethergraph.services.llm.registry import EndpointAdapterDescriptor
@@ -63,6 +67,63 @@ def test_catalog_maintenance_command_uses_production_loader(capsys) -> None:
     assert report["digest"] == catalog_digest()
     assert report["entry_count"] == len(load_model_catalog().entries)
     assert report["operations"] == ["chat", "embeddings", "image_generation"]
+
+
+def test_gpt_6_luna_catalog_binding_and_coverage_report() -> None:
+    catalog = load_model_catalog()
+    report = model_coverage_report(
+        catalog,
+        provider_id="openai",
+        endpoint_id="openai_responses",
+        model_ids=("gpt-6-luna",),
+    )
+    coverage = report["models"]["gpt-6-luna"]
+    assert coverage["native_tool_search"]["catalog_key"] == ("openai/new-native-tool-search/v10")
+    assert coverage["chat_tools"]["catalog_key"] == ("openai/gpt-6-responses-chat-tools/v10")
+    assert coverage["structured_output"] is not None
+    assert coverage["input_media"] is not None
+    assert (
+        resolve_model_catalog_capability_entry(
+            "openai",
+            "gpt-6-luna",
+            "chat",
+            "openai_chat_completions",
+            capability="chat_tools",
+        )
+        is None
+    )
+    discovery = resolve_tool_discovery_capabilities("openai", "gpt-6-luna", "responses")
+    assert discovery is not None
+    assert "native_client" in {mode.mode for mode in discovery.supported_modes}
+
+
+@pytest.mark.parametrize("model", ("gpt-5.6-cyber", "gpt-5.5-pro"))
+def test_new_openai_models_have_exact_structured_output_evidence(model: str) -> None:
+    entry = resolve_model_catalog_capability_entry(
+        "openai",
+        model,
+        "chat",
+        "openai_responses",
+        capability="structured_output",
+    )
+    assert entry is not None
+    assert entry.catalog_key == "openai/new-structured-output/v10"
+    assert entry.structured_output is not None
+    assert entry.structured_output.native_strict_schema
+
+
+def test_catalog_model_ids_are_exact_and_unique() -> None:
+    entry = next(
+        item
+        for item in load_model_catalog().entries
+        if item.catalog_key == "openai/gpt-6-responses-chat-tools/v10"
+    )
+    assert entry.matches("gpt-6-luna")
+    assert not entry.matches("gpt-6-lunar")
+    payload = entry.model_dump(mode="json")
+    payload["model_ids"] = ["gpt-6-luna", "gpt-6-luna"]
+    with pytest.raises(ValidationError, match="unique"):
+        ModelCatalogEntry.model_validate(payload)
 
 
 def test_catalog_resolves_operation_capabilities_without_manufacturing_unknowns() -> None:
@@ -688,10 +749,16 @@ def test_gpt_image_25_resolves_required_editing_capabilities(flavor: str, snapsh
     assert binding.capabilities.image_editing.provenance[0].source == "catalog"
 
 
-@pytest.mark.parametrize("model", (
-    "gpt-image-2.5", "gpt-image-2.5-unknown", "gpt-image-2.5-flare-2099-01-01",
-    "gpt-image-2.5-sunburst-2099-01-01", "future-image-model",
-))
+@pytest.mark.parametrize(
+    "model",
+    (
+        "gpt-image-2.5",
+        "gpt-image-2.5-unknown",
+        "gpt-image-2.5-flare-2099-01-01",
+        "gpt-image-2.5-sunburst-2099-01-01",
+        "future-image-model",
+    ),
+)
 def test_uncataloged_image_models_still_reject_required_editing(model: str) -> None:
     profile = ImageGenerationProfile(
         connection=ProviderConnection(provider_id="openai", endpoint_id="openai_images"),
@@ -838,7 +905,10 @@ def test_server_compaction_capability_is_catalog_and_endpoint_scoped() -> None:
     assert unsupported.compatibility.diagnostics[0].code == ("adapter_capability_unimplemented")
 
 
-@pytest.mark.parametrize("provider,model", [("openai", "gpt-5.2"), ("anthropic", "claude-sonnet-4-6"), ("google", "gemini-2.5-flash")])
+@pytest.mark.parametrize(
+    "provider,model",
+    [("openai", "gpt-5.2"), ("anthropic", "claude-sonnet-4-6"), ("google", "gemini-2.5-flash")],
+)
 def test_image_input_facts_are_resolved_from_exact_catalog_record(provider, model):
     profile = chat_profile_from_legacy(LLMProfile(provider=provider, model=model))
     binding = resolve_chat_profile(profile, required=("image_input",))
@@ -846,5 +916,7 @@ def test_image_input_facts_are_resolved_from_exact_catalog_record(provider, mode
     assert binding.capabilities.image_input.state == "supported"
     assert binding.capabilities.image_input.provenance[0].source == "catalog"
     assert f"{provider}/{model}-input-media/v8" in binding.catalog_keys
-    unknown = profile.model_copy(update={"model": profile.model.model_copy(update={"model_id": model + "-unverified"})})
+    unknown = profile.model_copy(
+        update={"model": profile.model.model_copy(update={"model_id": model + "-unverified"})}
+    )
     assert not resolve_chat_profile(unknown, required=("image_input",)).valid

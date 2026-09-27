@@ -530,3 +530,20 @@ def test_public_contract_json_schemas_forbid_unknown_object_fields() -> None:
     ):
         schema = contract.model_json_schema()
         assert schema["additionalProperties"] is False
+
+
+@pytest.mark.parametrize("status", ["dispatched", "queued", "submission_unknown"])
+def test_tool_admission_receipts_round_trip_without_claiming_completion(status):
+    from aethergraph.contracts.integration.models import LegacyToolActivityPayload
+
+    receipt = ToolActivityPayload(tool_call_id="call", tool_name="simulate", status=status)
+    assert ToolActivityPayload.model_validate_json(receipt.model_dump_json()) == receipt
+    with pytest.raises(ValidationError):
+        LegacyToolActivityPayload(tool_call_id="call", tool_name="simulate", status=status)
+    with pytest.raises(ValidationError, match="Only failed"):
+        ToolActivityPayload(
+            tool_call_id="call",
+            tool_name="simulate",
+            status=status,
+            error=ToolErrorPayload(kind="runtime", code="worker_failed", summary="Worker failed"),
+        )

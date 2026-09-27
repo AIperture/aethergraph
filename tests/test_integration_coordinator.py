@@ -613,13 +613,14 @@ async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failu
 
 
 @pytest.mark.asyncio
-async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None:
+@pytest.mark.parametrize("response_kind", ["choice", "text"])
+async def test_coordinator_resumes_exact_public_interaction_id(tmp_path, response_kind) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
     continuation = await _create_wait(
         continuation_store,
         run_id="run-waiting-1",
         node_id="node-choice",
-        kind="choice",
+        kind="choice" if response_kind == "choice" else "user_input",
         prompt={"title": "Proceed?", "options": ["Yes", "No"]},
         session_id="session-1",
         interaction_id="interaction-public-1",
@@ -642,6 +643,16 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
             option_ids=("Yes",),
         ),
     )
+    if response_kind == "text":
+        envelope = envelope.model_copy(
+            update={
+                "input": envelope.input.model_copy(
+                    update={
+                        "payload": {"interaction_id": "interaction-public-1", "text": "Yes"},
+                    }
+                )
+            }
+        )
 
     receipt = await coordinator.accept(verified=_verified(), envelope=envelope)
 
@@ -650,7 +661,12 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
     assert root.calls == []
     assert resume.calls[0]["continuation"].continuation_id == continuation.continuation_id
     assert resume.calls[0]["payload"]["interaction_id"] == "interaction-public-1"
-    assert resume.calls[0]["payload"]["choice"] == "Yes"
+    assert resume.calls[0]["payload"]["choice" if response_kind == "choice" else "text"] == "Yes"
+    semantic = await coordinator.semantic_events.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert semantic[0].event.payload.interaction_id == "interaction-public-1"
     await event_log.close()
 
 
@@ -695,6 +711,62 @@ async def test_interaction_resolver_resolves_exact_public_identity() -> None:
 
     assert resolved.interaction_id == "interaction-public-1"
     assert resolved.continuation.continuation_id == continuation.continuation_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["text", "files", "text_and_files"])
+@pytest.mark.parametrize("target", ["interaction-1", "missing", "wrong-kind"])
+async def test_explicit_response_never_falls_back_to_another_wait(response_kind, target):
+    store = InMemoryContinuationStore(secret=b"test-secret")
+    kind = {
+        "text": "user_input",
+        "files": "user_files",
+        "text_and_files": "user_input_or_files",
+    }[response_kind]
+    for interaction_id in ("interaction-1", "interaction-2", "wrong-kind"):
+        await _create_wait(
+            store,
+            run_id=interaction_id,
+            node_id="node-1",
+            kind="approval" if interaction_id == "wrong-kind" else kind,
+            session_id="session-1",
+            interaction_id=interaction_id,
+        )
+    envelope = _envelope()
+    payload = {"interaction_id": target}
+    if response_kind != "files":
+        payload["text"] = "The exact answer"
+    attachments = (
+        ()
+        if response_kind == "text"
+        else (
+            IngressAttachment(
+                attachment_id="attachment-1",
+                source_kind="provider_file",
+                source_id="file-1",
+                filename="answer.txt",
+                content_type="text/plain",
+                size_bytes=1,
+            ),
+        )
+    )
+    envelope = envelope.model_copy(
+        update={
+            "input": envelope.input.model_copy(
+                update={"type": "interaction.response", "payload": payload}
+            ),
+            "attachments": attachments,
+        }
+    )
+    resolver = InteractionResolver(store)
+    if target == "interaction-1":
+        resolved = await resolver.resolve(binding=_binding(), envelope=envelope)
+        assert resolved.interaction_id == target
+    else:
+        with pytest.raises(InteractionResolutionError) as error:
+            await resolver.resolve(binding=_binding(), envelope=envelope)
+        expected = "not_found" if target == "missing" else "kind_mismatch"
+        assert error.value.code == f"integration.interaction_{expected}"
 
 
 @pytest.mark.asyncio

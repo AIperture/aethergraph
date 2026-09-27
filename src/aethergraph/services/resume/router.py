@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from logging import getLogger
 from typing import Any
@@ -10,7 +11,11 @@ from jsonschema import ValidationError, validate
 
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.resume import ResumeBus
-from aethergraph.services.continuations.continuation import Continuation, ContinuationStatus
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    ContinuationResumeMode,
+    ContinuationStatus,
+)
 
 log = getLogger(__name__)
 
@@ -90,13 +95,24 @@ class ResumeRouter:
             payload: Incoming or synthesized resume payload.
 
         Returns:
-            None: Cooperative or scheduler delivery is complete.
+            None: The response has been retained or delivered as its owner requested.
 
         Notes:
             This method performs no token lookup and never weakens external authorization.
+            A cooperative response is retained through revision compare-and-set
+            before releasing its waiter. Stale and repeated responses are rejected.
+            Record-only continuations commit the answer without releasing a waiter
+            or enqueueing the original run; their durable owner collects the answer.
         """
         if continuation.closed:
             raise PermissionError("Invalid continuation or token")
+        current = await self.store.get_by_id(
+            continuation.run_id,
+            continuation.node_id,
+            continuation.continuation_id,
+        )
+        if current is None or current.closed or current.revision != continuation.revision:
+            raise PermissionError("Invalid or stale continuation")
         incoming = payload or {}
         if continuation.resume_schema:
             try:
@@ -110,16 +126,46 @@ class ResumeRouter:
             **incoming,
         }
         wait_id = continuation.continuation_id
-        if self.waits and wait_id in getattr(self.waits, "_futs", {}):
-            self.waits.resolve(wait_id, full_payload)
-            await self.store.close(
-                continuation,
-                status=ContinuationStatus.RESUMED,
-                closed_at=datetime.now(UTC),
-            )
-            self.logger.info(
-                "Resolved cooperative wait for %s/%s", continuation.run_id, continuation.node_id
-            )
+        record_only = current.resume_mode == ContinuationResumeMode.RECORD_ONLY
+        has_waiter = self.waits and wait_id in getattr(self.waits, "_futs", {})
+        if record_only or has_waiter:
+            try:
+                await self.store.update(
+                    replace(
+                        current,
+                        revision=current.revision + 1,
+                        status=ContinuationStatus.RESUMED,
+                        closed_at=datetime.now(UTC),
+                        payload=full_payload,
+                    ),
+                    expected_revision=current.revision,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Continuation response persistence failed",
+                    extra={
+                        "run_id": current.run_id,
+                        "node_id": current.node_id,
+                        "continuation_id": wait_id,
+                        "revision": current.revision,
+                    },
+                )
+                raise
+            if record_only:
+                return
+            scheduled = self.waits.resolve(wait_id, full_payload, cache_if_missing=False)
+            if scheduled:
+                self.logger.info(
+                    "Scheduled cooperative response for %s/%s",
+                    current.run_id,
+                    current.node_id,
+                )
+            else:
+                self.logger.info(
+                    "Retained committed response after its waiter ended for %s/%s",
+                    current.run_id,
+                    current.node_id,
+                )
             return
 
         await self.runner.enqueue_resume(continuation=continuation, payload=full_payload)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 import importlib
 from pathlib import Path
 import sys
@@ -28,6 +28,7 @@ from aethergraph.services.container.default_container import (
     DefaultContainer,
     build_default_container,
 )
+from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.services.integration import (
     InteractionResolutionError,
     InteractionResolver,
@@ -48,6 +49,7 @@ from .contracts import (
     RuntimeArtifactScope,
     RuntimeGraphRegistration,
     RuntimeIdentity,
+    RuntimeInteractionStatus,
     RuntimeModelProfile,
     RuntimeOpenRequest,
     RuntimeRegistrationSnapshot,
@@ -142,13 +144,16 @@ class EmbeddedRuntime:
         self._output_capture: RuntimeOutputCaptureHost | None = None
         self._semantic_stores: dict[str, SemanticEventStore] = {}
         self._integration: RuntimeIntegration | None = None
-        self._active_run_ids: set[str] = set()
+        self._graphs_loaded = False
+        self._timer_started = False
+        self._triggers_started = False
         self._readiness_lock = asyncio.Lock()
         self._ready = False
         self._closed = False
+        self._closing = False
 
-    async def start(self) -> None:
-        """Establish storage readiness before publishing this runtime to callers.
+    async def start(self, *, graph_ids: Sequence[str] = ()) -> None:
+        """Establish storage and registered-graph scheduling before Host publication.
 
         The explicit barrier runs the same idempotent readiness path used by every
         runtime operation, allowing an embedding Host to keep a failed runtime private.
@@ -160,23 +165,34 @@ class EmbeddedRuntime:
             await runtime.start()
             ```
 
-            Reuse established readiness:
+            Start scheduling for graphs registered by an installed package:
             ```python
-            await runtime.start()
-            await runtime.start()
+            await runtime.start(graph_ids=("installed_agent",))
+            await runtime.start(graph_ids=("installed_agent",))
             ```
 
         Args:
-            None.
+            graph_ids: Already registered graphs required by this Host. Every identity
+                is validated before enabling scheduler recovery. Graphs loaded through
+                `load_graph` already establish registration readiness.
 
         Returns:
-            None: The selected storage composition is ready.
+            None: Storage is ready and registered-graph schedulers have started.
 
         Notes:
             Startup failure remains terminal for this runtime instance. The embedding
             Host may close it and construct a fresh instance from its owned request.
         """
 
+        self._ensure_open()
+        if graph_ids:
+            snapshot = self.registration_snapshot(agent_ids=(), graph_ids=graph_ids)
+            missing = set(graph_ids) - snapshot.registered_graph_ids
+            if missing:
+                raise RuntimeGraphLoadError(
+                    f"Cannot start scheduling with unregistered graphs: {sorted(missing)!r}."
+                )
+            self._graphs_loaded = True
         await self._ensure_ready()
 
     @property
@@ -210,11 +226,7 @@ class EmbeddedRuntime:
         """
 
         composition = getattr(self._container, "storage_composition", None)
-        return (
-            composition.startup_diagnostic
-            if composition is not None
-            else None
-        )
+        return composition.startup_diagnostic if composition is not None else None
 
     @contextmanager
     def activate(self) -> Iterator[None]:
@@ -301,6 +313,7 @@ class EmbeddedRuntime:
             raise RuntimeGraphLoadError(
                 f"Module {module_name!r} did not register declared graph {graph_id!r}."
             )
+        self._graphs_loaded = True
         return RuntimeGraphRegistration(
             module_name=module_name,
             symbol_name=symbol_name,
@@ -458,7 +471,6 @@ class EmbeddedRuntime:
                 app_name=request.app_name,
                 run_config=dict(request.run_config),
             )
-        self._active_run_ids.add(record.run_id)
         return _public_record(record)
 
     async def cancel(
@@ -562,10 +574,8 @@ class EmbeddedRuntime:
         if record is None:
             return None
         status = getattr(record.status, "value", str(record.status))
-        if status in {"succeeded", "failed", "canceled"}:
-            if self._output_capture is not None:
-                await self._output_capture.flush_run(run_id)
-            self._active_run_ids.discard(run_id)
+        if status in {"succeeded", "failed", "canceled"} and self._output_capture is not None:
+            await self._output_capture.flush_run(run_id)
         output: Mapping[str, Any] | None = None
         result_store = self._container.run_result_store
         if status == "succeeded" and result_store is not None:
@@ -594,6 +604,67 @@ class EmbeddedRuntime:
             output=output,
             run_error_info=run_error_info,
             node_diagnostics=diagnostics,
+        )
+
+    async def inspect_interaction(
+        self, *, session_id: str, interaction_id: str
+    ) -> RuntimeInteractionStatus:
+        """Inspect one exact question independently of its parent's execution state.
+
+        Canonical continuation state and deadline determine response eligibility.
+        Inspection performs no resume, timer delivery or model invocation.
+
+        Examples:
+            Read an open question:
+            ```python
+            state = await runtime.inspect_interaction(
+                session_id="parent", interaction_id="question-1",
+            )
+            ```
+            Read it after a response:
+            ```python
+            final = await runtime.inspect_interaction(
+                session_id="parent", interaction_id=state.interaction_id,
+            )
+            ```
+
+        Args:
+            session_id: Owning session or authorized submitting ancestor.
+            interaction_id: Exact public question identity.
+
+        Returns:
+            RuntimeInteractionStatus: Waiting, resumed, canceled or expired state,
+                with canonical revision and timestamps. Response contents stay private.
+
+        Notes:
+            An elapsed deadline is expired even before timer delivery. A retained
+            deadline response is expired, not a user answer. Unknown or unauthorized
+            identities raise RuntimeInteractionError through the answer boundary.
+        """
+        await self._ensure_ready()
+        try:
+            resolved = await InteractionResolver(
+                self._container.cont_store, run_manager=self._container.run_manager
+            ).inspect_exact(session_id=session_id, interaction_id=interaction_id)
+        except InteractionResolutionError as exc:
+            raise RuntimeInteractionError(code=exc.code, message=str(exc)) from exc
+        wait = resolved.continuation
+        status = wait.status
+        if status is ContinuationStatus.WAITING:
+            if wait.deadline is not None and wait.deadline <= datetime.now(UTC):
+                status = ContinuationStatus.EXPIRED
+        elif status is ContinuationStatus.RESUMED:
+            payload = wait.payload or {}
+            if payload.get("timer_kind") == "deadline" or payload.get("timed_out") is True:
+                status = ContinuationStatus.EXPIRED
+            elif payload.get("cancelled") is True:
+                status = ContinuationStatus.CANCELED
+        return RuntimeInteractionStatus(
+            interaction_id=interaction_id,
+            status=status.value,
+            revision=wait.revision,
+            deadline=wait.deadline,
+            closed_at=wait.closed_at,
         )
 
     async def respond_to_interaction(
@@ -651,7 +722,10 @@ class EmbeddedRuntime:
         if response_kind not in {"text", "choice"}:
             raise ValueError(f"Unsupported interaction response kind: {response_kind}")
         try:
-            resolved = await InteractionResolver(self._container.cont_store).resolve_exact(
+            resolved = await InteractionResolver(
+                self._container.cont_store,
+                run_manager=self._container.run_manager,
+            ).resolve_exact(
                 session_id=session_id,
                 interaction_id=interaction_id,
                 expected_kinds=expected_kinds,
@@ -667,7 +741,7 @@ class EmbeddedRuntime:
         if response_kind == "choice":
             payload.update(
                 normalize_choice_reply(
-                    prompt=continuation.prompt,
+                    prompt=continuation.interaction_prompt,
                     raw_choice=choice,
                     raw_text=text,
                 )
@@ -1257,13 +1331,18 @@ class EmbeddedRuntime:
         async with self._readiness_lock:
             if self._closed:
                 return
+            self._closing = True
+            # Stop ingress before joining every run owned by the manager, including
+            # children submitted by graph code. Keep storage open if either fails.
+            if self._timer_started:
+                await self._container.continuation_timer.stop()
+                self._timer_started = False
+            if self._triggers_started:
+                await self._container.trigger_engine.stop()
+                self._triggers_started = False
+            if self._container.run_manager is not None:
+                await self._container.run_manager.close()
             failures: list[str] = []
-            for run_id in tuple(self._active_run_ids):
-                try:
-                    await self._require_run_manager().cancel_run(run_id)
-                except Exception as exc:  # noqa: BLE001
-                    failures.append(f"cancel {run_id}: {exc}")
-            self._active_run_ids.clear()
             if self._output_capture is not None:
                 try:
                     await self._output_capture.close()
@@ -1282,18 +1361,30 @@ class EmbeddedRuntime:
                 raise RuntimeError("Embedded runtime close failed: " + "; ".join(failures))
 
     def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("Embedded runtime is closed.")
+        if self._closed or self._closing:
+            raise RuntimeError("Embedded runtime is closing or closed.")
 
     async def _ensure_ready(self) -> None:
         self._ensure_open()
-        if self._ready:
+        if self._ready and (
+            (self._timer_started and self._triggers_started) or not self._graphs_loaded
+        ):
             return
         async with self._readiness_lock:
-            if self._ready:
-                return
-            await self._container.start_storage()
-            self._ready = True
+            self._ensure_open()
+            if not self._ready:
+                await self._container.start_storage()
+                self._ready = True
+            if self._graphs_loaded and not self._timer_started:
+                # Graph registration precedes recovery. Starting a timer on mere
+                # storage reads could consume waits before their graph is loaded.
+                with self.activate():
+                    await self._container.continuation_timer.start()
+                self._timer_started = True
+            if self._graphs_loaded and not self._triggers_started:
+                with self.activate():
+                    await self._container.trigger_engine.start()
+                self._triggers_started = True
 
     def _require_run_manager(self) -> Any:
         self._ensure_open()

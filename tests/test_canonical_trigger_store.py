@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from inspect import getdoc
 from pathlib import Path
@@ -198,6 +198,83 @@ async def test_trigger_service_consumes_canonical_store_without_app_or_client_pa
 
 
 @pytest.mark.asyncio
+async def test_trigger_creation_replay_preserves_cancellation_and_revision(tmp_path: Path) -> None:
+    store, repository, database, _clock = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    scope = Scope(org_id="org-1", user_id="user-1", session_id="session-1", agent_id="agent-1")
+    request = dict(
+        graph_id="wake",
+        default_inputs={"message": "ready"},
+        kind="interval",
+        interval_seconds=60,
+        idempotency_key="delivery-1",
+    )
+    try:
+        created = await service.create_from_scope(scope=scope, **request)
+        assert await service.cancel(
+            created.trigger_id,
+            org_id="org-1",
+            user_id="user-1",
+            client_id=None,
+        )
+        before = await repository.get(OWNER, created.trigger_id)
+        replayed = await service.create_from_scope(
+            scope=replace(scope, run_id="recovery-run", node_id="recovery-node"),
+            **request,
+        )
+        after = await repository.get(OWNER, created.trigger_id)
+        assert replayed.trigger_id == created.trigger_id
+        assert replayed.active is False
+        assert before is not None and after is not None
+        assert after.revision == before.revision
+        assert after.next_fire_at == before.next_fire_at
+        with pytest.raises(StorageConflictError, match="different request"):
+            await service.create_from_scope(scope=scope, **{**request, "interval_seconds": 120})
+        other = await service.create_from_scope(
+            scope=replace(scope, session_id="session-2"),
+            **request,
+        )
+        assert other.trigger_id != created.trigger_id
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_trigger_creation_recovers_lost_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, database, _clock = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    request = dict(
+        scope=Scope(org_id="org-1", user_id="user-1", session_id="session-1"),
+        graph_id="wake",
+        default_inputs={},
+        kind="interval",
+        interval_seconds=60,
+        idempotency_key="delivery-1",
+    )
+    create = store.create
+    created_ids: list[str] = []
+
+    async def lose_acknowledgement(record: TriggerRecord) -> None:
+        await create(record)
+        created_ids.append(record.trigger_id)
+        raise OSError("creation acknowledgement lost")
+
+    monkeypatch.setattr(store, "create", lose_acknowledgement)
+    try:
+        with pytest.raises(OSError, match="acknowledgement lost"):
+            await service.create_from_scope(**request)
+        recovered = await service.create_from_scope(**request)
+        assert created_ids == [recovered.trigger_id]
+        persisted = await repository.get(OWNER, recovered.trigger_id)
+        assert persisted is not None and persisted.revision == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_canonical_event_queries_filter_client_only_after_bounded_hydration(
     tmp_path: Path,
 ) -> None:
@@ -330,3 +407,78 @@ def test_canonical_trigger_public_docstrings_follow_strict_contract() -> None:
             docstring.index(section) for section in ("Examples:", "Args:", "Returns:", "Notes:")
         ]
         assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_run", [None, "origin-run"])
+async def test_trigger_origin_survives_reopen_and_exact_creation_replay(
+    tmp_path: Path, source_run
+) -> None:
+    from aethergraph.contracts.integration import OriginBinding
+    from aethergraph.core.runtime.run_types import RunParent
+    from aethergraph.services.triggers.engine import TriggerEngine
+    from aethergraph.services.triggers.trigger_facade import TriggerConfig, TriggerFacade
+    from tests.test_triggers import FakeRunManager
+
+    origin = OriginBinding(
+        integration_id="studio",
+        route_id="session-chat",
+        session_id="session-1",
+        channel_key="ui:session:session-1",
+        external_conversation_id="session-1",
+        capability_profile_id="chat/v1",
+    )
+    scope = Scope(
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session-1",
+        agent_id="agent-1",
+        run_id=source_run,
+    )
+    store, _, database, _ = _store(tmp_path)
+    service = TriggerServiceImpl(store=store)
+    request = dict(
+        graph_id="wake",
+        default_inputs={"invocation_id": "inv-1"},
+        config=TriggerConfig(kind="interval", interval_seconds=10, catch_up_missed=True),
+        idempotency_key="origin-test",
+    )
+    facade = TriggerFacade(
+        trigger_service=service, trigger_engine=None, scope=scope, origin_binding=origin
+    )
+    created = await facade.create(**request)
+    expected_parent = RunParent(source_run, scope.session_id) if source_run else None
+    assert created.parent_run == expected_parent
+    assert TriggerRecord.from_dict(created.to_dict()).origin_binding == origin
+    assert TriggerRecord.from_dict(created.to_dict()).parent_run == expected_parent
+    await database.close()
+
+    store, _, database, _ = _store(tmp_path)
+    try:
+        service = TriggerServiceImpl(store=store)
+        facade = replace(facade, trigger_service=service, scope=replace(scope, run_id="later-run"))
+        replay = await facade.create(**request)
+        assert replay.trigger_id == created.trigger_id
+        assert replay.origin_binding == origin
+        restored = await store.get(created.trigger_id)
+        assert restored.origin_binding == origin
+        assert replay.parent_run == restored.parent_run == expected_parent
+        manager = FakeRunManager()
+        engine = TriggerEngine(store=store, run_manager=manager)
+        await engine._submit(
+            restored, inputs=restored.default_inputs, run_id="wake-run", fire_id="fire-1"
+        )
+        config = {"origin_binding": origin.model_dump(mode="json")}
+        if source_run:
+            config["parent_run"] = {"run_id": source_run, "session_id": scope.session_id}
+        assert manager.calls[0]["run_config"] == config
+        with pytest.raises(StorageConflictError, match="different request"):
+            await replace(
+                facade, origin_binding=origin.model_copy(update={"route_id": "other-route"})
+            ).create(**request)
+        with pytest.raises(ValueError, match="must match its session"):
+            await replace(
+                facade, origin_binding=origin.model_copy(update={"session_id": "other-session"})
+            ).create(**request)
+    finally:
+        await database.close()

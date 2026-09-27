@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -14,6 +15,7 @@ from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
+    RunParent,
     RunRecord,
     RunResult,
     RunStatus,
@@ -37,6 +39,7 @@ from aethergraph.storage.contracts import (
     SessionRecord as CanonicalSessionRecord,
     SessionRepository,
     StorageBundle,
+    StorageConflictError,
     StorageIntegrityError,
     StorageNotFoundError,
     StorageScope,
@@ -55,6 +58,7 @@ _RESERVED_PUBLIC_METADATA = frozenset(
         _DEPRECATED_APP_ID,
         "application_id",
         "client_id",
+        "parent",
     }
 )
 
@@ -155,41 +159,61 @@ class CanonicalRunStore(RunStore):
             None: The run was absent, unchanged, or committed.
 
         Notes:
-            Unknown/provider-owned field changes fail; stale revisions propagate.
+            Unknown/provider-owned field changes fail. Bounded CAS retries merge
+            concurrent provider updates; terminal outcomes cannot be reopened.
         """
-        current = await self._repository.get(
-            _operation_scope(self._owner_scope, run_id=run_id), run_id
-        )
-        if current is None:
-            return
-        public, service, compatibility = _metadata_parts(current.metadata, "run")
-        public.update(_run_public_metadata(meta_update or {}))
-        if field_updates:
-            allowed = {"result_available", "result_updated_at"}
-            unknown = set(field_updates) - allowed
-            if unknown:
-                raise ValueError("Unsupported run field updates: " + ", ".join(sorted(unknown)))
-            if (
-                field_updates.get("result_available", current.result_available)
-                != current.result_available
-            ):
-                raise ValueError("result_available is provider-owned")
-            if (
-                field_updates.get("result_updated_at", current.result_updated_at)
-                != current.result_updated_at
-            ):
-                raise ValueError("result_updated_at is provider-owned")
-        proposed = replace(
-            current,
-            revision=current.revision + 1,
-            status=CanonicalRunStatus(status.value),
-            finished_at=current.finished_at if finished_at is None else finished_at,
-            error=current.error if error is None else error,
-            metadata=_metadata(public, service, compatibility),
-        )
-        if replace(proposed, revision=current.revision) == current:
-            return
-        await self._repository.compare_and_set(proposed, current.revision)
+        for attempt in range(8):
+            current = await self._repository.get(
+                _operation_scope(self._owner_scope, run_id=run_id), run_id
+            )
+            if current is None:
+                return
+            public, service, compatibility = _metadata_parts(current.metadata, "run")
+            public.update(_run_public_metadata(meta_update or {}))
+            if field_updates:
+                allowed = {"result_available", "result_updated_at"}
+                unknown = set(field_updates) - allowed
+                if unknown:
+                    raise ValueError("Unsupported run field updates: " + ", ".join(sorted(unknown)))
+                if (
+                    field_updates.get("result_available", current.result_available)
+                    != current.result_available
+                ):
+                    raise ValueError("result_available is provider-owned")
+                if (
+                    field_updates.get("result_updated_at", current.result_updated_at)
+                    != current.result_updated_at
+                ):
+                    raise ValueError("result_updated_at is provider-owned")
+            terminal = {
+                CanonicalRunStatus.SUCCEEDED,
+                CanonicalRunStatus.FAILED,
+                CanonicalRunStatus.CANCELED,
+            }
+            requested_status = CanonicalRunStatus(status.value)
+            if current.status in terminal and requested_status != current.status:
+                if requested_status not in terminal:
+                    # Completion won the race. A stale control or startup write
+                    # cannot reopen the run or replace its terminal evidence.
+                    return
+                raise StorageIntegrityError("A terminal run outcome cannot be replaced")
+            proposed = replace(
+                current,
+                revision=current.revision + 1,
+                status=CanonicalRunStatus(status.value),
+                finished_at=current.finished_at if finished_at is None else finished_at,
+                error=current.error if error is None else error,
+                metadata=_metadata(public, service, compatibility),
+            )
+            if replace(proposed, revision=current.revision) == current:
+                return
+            try:
+                await self._repository.compare_and_set(proposed, current.revision)
+                return
+            except StorageConflictError:
+                if attempt == 7:
+                    raise
+                await asyncio.sleep(0)
 
     async def get(self, run_id: str) -> RunRecord | None:
         """Read one provider-authorized run and project it to runtime shape.
@@ -431,7 +455,7 @@ class CanonicalRunResultStore(RunResultStore):
         record = await self._repository.get(
             _operation_scope(self._owner_scope, run_id=run_id), run_id
         )
-        return _result_to_service(record) if record is not None else None
+        return project_canonical_run_result(record) if record is not None else None
 
     async def delete(self, run_id: str) -> None:
         """Delete one current result through exact provider revision CAS.
@@ -929,7 +953,7 @@ def _run_to_canonical(
             agent_id=record.agent_id,
         ),
     )
-    service = {
+    service: dict[str, Any] = {
         "origin": record.origin.value,
         "visibility": record.visibility.value,
         "importance": record.importance.value,
@@ -953,6 +977,8 @@ def _run_to_canonical(
         tags=tuple(record.tags),
         error=record.error,
         metadata=_metadata(_run_public_metadata(record.meta), service, compatibility),
+        parent_run_id=record.parent.run_id if record.parent is not None else None,
+        parent_session_id=record.parent.session_id if record.parent is not None else None,
         artifact_count=record.artifact_count,
         first_artifact_at=record.first_artifact_at,
         last_artifact_at=record.last_artifact_at,
@@ -1009,6 +1035,11 @@ def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
         importance=RunImportance(str(service.get("importance") or RunImportance.normal.value)),
         agent_id=record.scope.agent_id,
         app_id=_deprecated_app_id(compatibility),
+        parent=(
+            RunParent(record.parent_run_id, record.parent_session_id)
+            if record.parent_run_id is not None
+            else None
+        ),
         artifact_count=record.artifact_count,
         first_artifact_at=record.first_artifact_at,
         last_artifact_at=record.last_artifact_at,
@@ -1018,7 +1049,29 @@ def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
     )
 
 
-def _result_to_service(record: CanonicalRunResultRecord) -> RunResult:
+def project_canonical_run_result(record: CanonicalRunResultRecord) -> RunResult:
+    """Project frozen provider output into one detached runtime result.
+
+    Intro:
+        Live and historical readers share recursive JSON conversion without
+        exposing provider-owned immutable containers.
+
+    Examples:
+        Project an authorized result:
+            ```python
+            result = project_canonical_run_result(record)
+            ```
+        Serialize its ordinary JSON output:
+            ```python
+            encoded = json.dumps(result.outputs)
+            ```
+    Args:
+        record: Canonical result already authorized by its repository query.
+    Returns:
+        RunResult: Detached metadata and recursively converted graph output.
+    Notes:
+        This performs no storage writes or result acknowledgement.
+    """
     outputs = _plain(record.outputs)
     if not isinstance(outputs, dict):
         raise ValueError("Canonical run result outputs must be an object")
@@ -1069,6 +1122,8 @@ def _metadata_parts(
     if not isinstance(compatibility, dict):
         raise ValueError(f"Canonical {label} compatibility metadata is malformed")
     if label == "run":
+        if "parent" in service:
+            raise ValueError("Canonical run parent metadata requires storage migration")
         public = _run_public_metadata(public)
     return public, service, compatibility
 

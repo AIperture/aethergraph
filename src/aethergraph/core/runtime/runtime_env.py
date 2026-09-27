@@ -41,8 +41,6 @@ def _canonical_scope(scope: Any) -> StorageScope:
     )
 
 
-
-
 @dataclass
 class RuntimeEnv:
     """Unified runtime env that is built from DefaultContainer and can spawn NodeContexts."""
@@ -201,20 +199,30 @@ class RuntimeEnv:
             trigger_service=self.container.trigger_service,
             trigger_engine=self.container.trigger_engine,
             scope=trigger_scope,
+            origin_binding=self.origin_binding,
         )
 
         runner = RunFacade(
             run_manager=self.container.run_manager,
-            identity=self.identity,
+            # An unscoped direct caller is still a bound identity. Passing None
+            # lets RunManager choose its top-level local defaults and moves the
+            # child into another tenant's session storage.
+            identity=self.identity if self.identity is not None else RequestIdentity(),
             session_id=self.session_id,
             agent_id=self.agent_id,
             app_id=self.app_id,
             current_run_id=self.run_id,
             origin_binding=self.origin_binding,
+            session_state_reader=(
+                self.container.observability.read_session_state
+                if self.container.observability is not None
+                else None
+            ),
         )
 
         services = NodeServices(
             channels=self.channels,
+            resume_router=self.resume_router,
             continuation_store=self.continuation_store,
             artifact_store=artifact_facade,
             wait_registry=self.wait_registry,

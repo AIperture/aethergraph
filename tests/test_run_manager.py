@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -6,7 +7,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
-from aethergraph.core.runtime.run_types import RunAdmissionError, RunOrigin, RunStatus
+from aethergraph.core.runtime.run_types import RunAdmissionError, RunOrigin, RunRecord, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.contracts.scope import StorageScope
@@ -479,8 +480,9 @@ async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["user_requested", "timeout"])
 async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_exits(
-    monkeypatch, dummy_meter
+    monkeypatch, dummy_meter, reason
 ):
     store = InMemoryRunStore()
     reg = UnifiedRegistry()
@@ -521,7 +523,7 @@ async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_
     )
     await asyncio.sleep(0.01)
 
-    await rm.cancel_run(record.run_id)
+    await rm.cancel_run(record.run_id, reason=reason)
     interim = await store.get(record.run_id)
     assert interim is not None
     assert interim.status == RunStatus.cancellation_requested
@@ -530,7 +532,7 @@ async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_
     final = await store.get(record.run_id)
     assert final is not None
     assert final.status == RunStatus.canceled
-    assert final.meta["cancel_reason"] == "user_requested"
+    assert final.meta["cancel_reason"] == reason
     assert final.meta["cancel_backend_kind"] is not None
 
 
@@ -541,6 +543,15 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     class FakeRunManager:
         def __init__(self) -> None:
             self.reasons: list[str] = []
+
+        async def get_record(self, run_id):
+            return RunRecord(
+                run_id=run_id,
+                graph_id="child",
+                kind="graphfn",
+                status=RunStatus.running,
+                started_at=datetime.now(UTC),
+            )
 
         async def cancel_run(
             self,
@@ -772,10 +783,12 @@ async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_succes
 
 
 @pytest.mark.asyncio
-async def test_success_status_is_durable_before_result_save(
+@pytest.mark.parametrize("fail_result_save", [False, True])
+async def test_result_persistence_precedes_success_and_failures_remain_visible(
     monkeypatch,
     dummy_meter,
     tmp_path,
+    fail_result_save,
 ):
     store = RunStoreFake()
 
@@ -786,9 +799,11 @@ async def test_success_status_is_durable_before_result_save(
             durable = await store.get(run_id)
             self.observed_status = durable.status if durable is not None else None
             assert durable is not None
-            assert durable.status == RunStatus.succeeded
-            assert durable.finished_at is not None
-            assert "output_preview" in durable.meta
+            assert durable.status == RunStatus.running
+            assert durable.finished_at is None
+            assert not durable.result_available
+            if fail_result_save:
+                raise OSError("Result store unavailable")
             await super().save(run_id, result)
 
     result_store = OrderingResultStore()
@@ -820,9 +835,16 @@ async def test_success_status_is_durable_before_result_save(
         identity=Identity(user_id="u1", org_id="o1"),
     )
     waited, outputs = await manager.wait_run(record.run_id, return_outputs=True)
-    assert waited.status == RunStatus.succeeded
-    assert outputs == {"out": 42}
-    assert result_store.observed_status == RunStatus.succeeded
+    assert result_store.observed_status == RunStatus.running
+    if fail_result_save:
+        assert waited.status == RunStatus.failed
+        assert not waited.result_available
+        assert outputs is None
+        assert "Result store unavailable" in waited.error
+    else:
+        assert waited.status == RunStatus.succeeded
+        assert waited.result_available
+        assert outputs == {"out": 42}
 
 
 @pytest.mark.asyncio

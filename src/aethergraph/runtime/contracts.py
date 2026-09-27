@@ -98,6 +98,17 @@ class RuntimeRunStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeInteractionStatus:
+    """Public question lifecycle without private tokens or response contents."""
+
+    interaction_id: str
+    status: str
+    revision: int
+    deadline: datetime | None
+    closed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeGraphRegistration:
     """Validated graph registration loaded inside an embedded runtime."""
 

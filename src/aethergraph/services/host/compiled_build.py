@@ -74,11 +74,13 @@ class CompiledFile(_ArtifactContract):
 class CompiledBuildManifest(_ArtifactContract):
     """Runtime-consumed projection of an Engine compiled-build manifest."""
 
-    schema_version: Literal["aethergraph.compiled-system-manifest/v16"]
+    schema_version: Literal["aethergraph.compiled-system-manifest/v17"]
     build_id: str = Field(pattern=r"^[0-9a-f]{24}$")
     package_name: str
     entrypoint_module: str
     entrypoint_symbol: str
+    control_entrypoint_symbol: str = Field(min_length=1)
+    control_graph_id: str = Field(min_length=1)
     source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     engine_version: str
     compiler_version: str
@@ -150,7 +152,7 @@ class _ResolvedAgent(_ProjectionContract):
 class ResolvedBuildIdentity(_ProjectionContract):
     """Host-required identity projected from the Engine resolved definition."""
 
-    schema_version: Literal["aethergraph.resolved-system/v13"]
+    schema_version: Literal["aethergraph.resolved-system/v14"]
     semantic_event_protocol_version: Literal["aethergraph.semantic-event/v3"]
     logical_output_requirements: tuple[Literal["origin"], ...]
     accepted_events: tuple[AcceptedEventContract, ...] = ()

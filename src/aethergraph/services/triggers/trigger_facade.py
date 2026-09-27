@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.engine import TriggerEngine
@@ -70,18 +71,20 @@ class TriggerFacade:
         trigger_service: Service used to create, cancel, and fetch trigger records.
         trigger_engine: Engine used to fan out and execute event-based triggers.
         scope: Bound runtime scope used for tenant-aware trigger creation/firing.
+        origin_binding: Immutable originating channel route inherited by scheduled runs.
 
     Returns:
         TriggerFacade: Dataclass wrapper exposing node-friendly trigger methods.
 
     Notes:
         The facade does not run polling loops itself; scheduled execution is
-        handled by `TriggerEngine.run_forever(...)` elsewhere in runtime wiring.
+        handled by the lifespan-owned `TriggerEngine.start()` task in runtime wiring.
     """
 
     trigger_service: TriggerService
     trigger_engine: TriggerEngine
     scope: Scope
+    origin_binding: OriginBinding | None = None
 
     # ------------ low-level: generic trigger management, mostly delegating to TriggerService --------------
     async def create(
@@ -91,6 +94,7 @@ class TriggerFacade:
         default_inputs: dict[str, Any],
         config: TriggerConfig,
         trigger_name: str | None = None,
+        idempotency_key: str | None = None,
     ) -> TriggerRecord:
         """
         Create a trigger from an explicit `TriggerConfig`.
@@ -124,6 +128,9 @@ class TriggerFacade:
             default_inputs: Base inputs merged into submitted runs.
             config: Trigger configuration payload describing kind and timing.
             trigger_name: Optional human-readable trigger label.
+            idempotency_key: Optional stable creation identity in the bound owner,
+                session and Agent scope. Identical retries reuse the schedule without
+                restarting it; changed requests with the same key fail.
 
         Returns:
             TriggerRecord: Persisted trigger record returned by the trigger
@@ -148,6 +155,8 @@ class TriggerFacade:
             catch_up_missed=config.catch_up_missed,
             origin="schedule" if config.kind != "event" else "event",
             trigger_name=trigger_name,
+            idempotency_key=idempotency_key,
+            origin_binding=self.origin_binding,
         )
 
     # ------------ higher-level: event triggers with convenient defaults --------------

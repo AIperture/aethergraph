@@ -31,7 +31,7 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
+from aethergraph.services.continuations.continuation import ContinuationStatus
 from aethergraph.utils.mime_types import mime_type_for_filename
 
 
@@ -454,7 +454,17 @@ class ChannelSession:
         *,
         tool_call_id: str,
         tool_name: str,
-        status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
+        status: Literal[
+            "started",
+            "running",
+            "waiting",
+            "completed",
+            "failed",
+            "canceled",
+            "dispatched",
+            "queued",
+            "submission_unknown",
+        ],
         message: str | None = None,
         error: dict[str, JsonValue] | None = None,
         channel: str | None = None,
@@ -499,6 +509,8 @@ class ChannelSession:
         Notes:
             This method reports execution activity only. Tool results remain in the
             Engine Ledger and authored user messages retain their existing path.
+            Dispatched, queued and submission_unknown are settled admission
+            receipts; later worker progress does not reopen the caller activity.
         """
         normalized_call_id = str(tool_call_id or "").strip()
         normalized_tool_name = str(tool_name or "").strip()
@@ -1481,6 +1493,8 @@ class ChannelSession:
             tags=["channel", "wait", kind],
             metadata=self._inject_context_meta({"channel_key": ch_key}),
         )
+        cont = None
+        fut = None
         try:
             resumed = self._take_matching_resume_payload(kind=kind, expected_payload=payload)
             if resumed is not None:
@@ -1511,55 +1525,44 @@ class ChannelSession:
             res = await self._bus.notify(cont)
             inline = (res or {}).get("payload")
             if inline is not None:
-                try:
-                    self.ctx.services.waits.resolve(cont.continuation_id, inline)
-                except Exception:
-                    logger = logging.getLogger("aethergraph.services.channel.session")
-                    logger.debug("Continuation token %s already resolved inline", cont.token)
-                try:
-                    cont.record = await self._cont_store.close(
-                        cont.record,
-                        status=ContinuationStatus.RESUMED,
-                        closed_at=datetime.now(UTC),
-                    )
-                except Exception:
-                    logger.debug("Failed to delete continuation for token %s", cont.token)
-                    logger.exception("Error occurred while deleting continuation")
-                await span.resume(metadata=wait_meta, response=inline)
-                await span.finish(response=inline, metadata=wait_meta)
-                return inline
-
-            corr = (res or {}).get("correlator")
-            if corr:
-                cont.record = await self._cont_store.bind_correlator(
-                    continuation=cont.record, corr=corr
-                )
-                cont.record = await self._cont_store.bind_correlator(
-                    continuation=cont.record,
-                    corr=Correlator(
-                        scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
-                    ),
-                )
-            else:
-                peek = await self._bus.peek_correlator(ch_key)
-                if peek:
-                    cont.record = await self._cont_store.bind_correlator(
-                        continuation=cont.record,
-                        corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
-                    )
-                else:
-                    cont.record = await self._cont_store.bind_correlator(
-                        continuation=cont.record,
-                        corr=Correlator(self._bus._prefix(ch_key), ch_key, "", ""),
-                    )
+                if self.ctx.services.resume_router is None:
+                    raise RuntimeError("Inline interaction requires the runtime resume router")
+                await self.ctx.services.resume_router.resume_continuation(cont.record, inline)
 
             result = await fut
             await span.resume(metadata=wait_meta, response=result)
             await span.finish(response=result, metadata=wait_meta)
             return result
-        except Exception as exc:
+        except BaseException as exc:
+            if cont is not None:
+                try:
+                    current = await self._cont_store.get_by_id(
+                        cont.run_id,
+                        cont.node_id,
+                        cont.continuation_id,
+                    )
+                    if current is not None and not current.closed:
+                        await self._cont_store.close(
+                            current,
+                            status=ContinuationStatus.CANCELED,
+                            closed_at=datetime.now(UTC),
+                        )
+                except Exception:
+                    self.ctx.logger().exception(
+                        "Failed to close interrupted interaction",
+                        extra={
+                            "run_id": cont.run_id,
+                            "node_id": cont.node_id,
+                            "continuation_id": cont.continuation_id,
+                        },
+                    )
             await span.fail(exc, metadata=self._inject_context_meta({"channel_key": ch_key}))
             raise
+        finally:
+            if fut is not None:
+                if not fut.done():
+                    fut.cancel()
+                self.ctx.services.wait_registry.cancel(cont.continuation_id)
 
     def _take_matching_resume_payload(
         self,

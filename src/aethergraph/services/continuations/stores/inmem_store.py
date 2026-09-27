@@ -78,6 +78,7 @@ class InMemoryContinuationStore:
             run_id=draft.run_id,
             node_id=draft.node_id,
             kind=draft.kind,
+            resume_mode=draft.resume_mode,
             prompt=draft.prompt,
             resume_schema=draft.resume_schema,
             deadline=draft.deadline,
@@ -394,6 +395,7 @@ def _identity(value: Continuation) -> tuple[object, ...]:
         value.agent_id,
         value.graph_id,
         value.app_id,
+        value.resume_mode,
     )
 
 

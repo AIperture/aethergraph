@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,10 @@ from aethergraph.observability.prompt_store import content_hash
 from aethergraph.server.security.redaction import canonical_json
 from aethergraph.services.canonical_storage_scope import merge_storage_scope
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.control.canonical_stores import project_canonical_run_record
+from aethergraph.services.control.canonical_stores import (
+    project_canonical_run_record,
+    project_canonical_run_result,
+)
 from aethergraph.storage.composition import StorageComposition
 from aethergraph.storage.contracts import (
     EventQuery,
@@ -351,7 +354,12 @@ class _CanonicalObservabilityFacade:
             cursor = page.next_cursor
 
     async def page_runs(
-        self, *, limit: int = 100, cursor: str | None = None, session_id: str | None = None
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        session_id: str | None = None,
+        parent_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Read one provider-cursor page without offset replay or a history ceiling.
 
@@ -371,6 +379,8 @@ class _CanonicalObservabilityFacade:
             limit: Provider page size, at most 1,000.
             cursor: Opaque provider continuation for the same scope.
             session_id: Optional exact session constraint applied by storage.
+            parent_run_id: Optional exact accessible parent; includes children in
+                distinct sessions while preserving the caller's owner scope.
         Returns:
             dict: Stable run mappings and an opaque next_cursor.
         Notes:
@@ -381,7 +391,15 @@ class _CanonicalObservabilityFacade:
         scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
         if scope is None:
             return {"items": [], "next_cursor": None}
-        page = await bundle.runs.query(RunQuery(scope=scope, page=page_request))
+        if parent_run_id is not None and await self.get_run(parent_run_id) is None:
+            return {"items": [], "next_cursor": None}
+        page = await bundle.runs.query(
+            RunQuery(
+                scope=scope,
+                page=page_request,
+                parent_run_id=parent_run_id,
+            )
+        )
         return {
             "items": [asdict(project_canonical_run_record(record)) for record in page.items],
             "next_cursor": page.next_cursor,
@@ -523,6 +541,43 @@ class _CanonicalObservabilityFacade:
         record = await bundle.runs.get(scope, run_id)
         return None if record is None else asdict(project_canonical_run_record(record))
 
+    async def get_run_output(self, run_id: str) -> dict[str, Any] | None:
+        """Read retained successful output without starting a runtime.
+
+        Intro:
+            The canonical result repository enforces the same owner and request
+            identity scope as run inspection. No run or result is acknowledged.
+
+        Examples:
+            Read a completed control receipt after its Host exits:
+                ```python
+                output = await facade.get_run_output("control-1")
+                ```
+            Handle unavailable output:
+                ```python
+                assert await facade.get_run_output("missing") is None
+                ```
+
+        Args:
+            run_id: Exact canonical run identity.
+
+        Returns:
+            dict[str, Any] | None: Retained graph output, or `None` if absent
+                or outside the caller's scope.
+
+        Notes:
+            Absence does not imply execution failure. Callers needing lifecycle
+            state inspect the owning run separately.
+        """
+        bundle = await self._bundle()
+        scope = self._query_scope(run_id=run_id)
+        if scope is None:
+            return None
+        result = await bundle.run_results.get(scope, run_id)
+        if result is None:
+            return None
+        return project_canonical_run_result(result).outputs
+
     async def list_engine_events(self, *, run_id: str) -> list[dict[str, Any]]:
         """List canonical Engine events for one run in causal storage order.
 
@@ -565,6 +620,78 @@ class _CanonicalObservabilityFacade:
             if cursor is None:
                 break
         return records
+
+    async def read_session_state(
+        self, *, session_id: str, owner_run_id: str, key: str, require_accessible: bool = False
+    ) -> dict[str, Any] | None:
+        """Read canonical session Agent state using an authorized run's exact owner.
+
+        Intro:
+            Hydrate the current session-wide mapping through the existing state
+            facade while preserving the retained run's tenant and project scope.
+
+        Examples:
+            Read retained runtime state after the originating run ends:
+            ```python
+            state = await reader.read_session_state(
+                session_id="s1", owner_run_id="r1", key="orchestration",
+            )
+            ```
+
+            Missing state remains absent:
+            ```python
+            assert await reader.read_session_state(
+                session_id="s1", owner_run_id="r1", key="missing",
+            ) is None
+            ```
+
+        Args:
+            session_id: Exact session containing the state.
+            owner_run_id: Retained run whose canonical scope authorizes the read.
+            key: Exact caller-owned state key; no namespace or scope override.
+            require_accessible: Raise when ownership cannot be established or is
+                suppressed, so lifecycle callers cannot mistake unavailable state for empty state.
+
+        Returns:
+            dict[str, Any] | None: Detached current state, or None for absent or
+                suppressed state and inaccessible or mismatched owners. When
+                require_accessible is true, only an absent key returns None.
+
+        Notes:
+            This uses the Agent-state facade and its session projection. It never
+            reconstructs state from logs, opens a runtime, or changes a revision.
+            Consumers must apply their own bounded, sanitized domain projection.
+        """
+        from aethergraph.services.agent_state.canonical_facade import (
+            CanonicalAgentStateFacade,
+        )
+
+        if not session_id.strip() or not owner_run_id.strip() or not key.strip():
+            raise ValueError("Session state requires exact session, run and key identities")
+        hidden = await self.list_suppressed_scopes(session_id=session_id)
+        if session_id in hidden.get("session_id", set()) or owner_run_id in (
+            hidden.get("run_id", set()) | hidden.get("trace_id", set())
+        ):
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
+            return None
+        scope = self._query_scope(session_id=session_id, run_id=owner_run_id)
+        if scope is None:
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
+            return None
+        bundle = await self._bundle()
+        owner = await bundle.runs.get(scope, owner_run_id)
+        if owner is None or owner.scope.session_id != session_id:
+            if require_accessible:
+                raise ObservabilityUnavailableError("Session state ownership is unavailable")
+            return None
+        facade = CanonicalAgentStateFacade(
+            state_store=bundle.state, scope=replace(owner.scope, agent_id=None)
+        )
+        handle = facade.bind(key=key, model=dict, level="session", backend="memory")
+        value = await handle.load(force=True)
+        return value if handle.revision else None
 
     async def read_memory_state(
         self,

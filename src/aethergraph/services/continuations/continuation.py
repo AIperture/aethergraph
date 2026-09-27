@@ -18,6 +18,13 @@ class ContinuationStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class ContinuationResumeMode(StrEnum):
+    """Owner selected response delivery, immutable after continuation creation."""
+
+    RUNTIME = "runtime"
+    RECORD_ONLY = "record_only"
+
+
 @dataclass(frozen=True, slots=True)
 class Correlator:
     """Platform-agnostic correlation key for continuations."""
@@ -63,6 +70,7 @@ class ContinuationDraft:
     run_id: str
     node_id: str
     kind: str
+    resume_mode: ContinuationResumeMode = ContinuationResumeMode.RUNTIME
     continuation_id: str = field(default_factory=lambda: f"cont-{uuid4().hex}")
     prompt: str | None = None
     resume_schema: dict[str, Any] | None = None
@@ -82,6 +90,9 @@ class ContinuationDraft:
     graph_id: str | None = None
     correlators: tuple[Correlator, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "resume_mode", ContinuationResumeMode(self.resume_mode))
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Continuation:
@@ -92,6 +103,7 @@ class Continuation:
     run_id: str
     node_id: str
     kind: str
+    resume_mode: ContinuationResumeMode = ContinuationResumeMode.RUNTIME
     status: ContinuationStatus = ContinuationStatus.WAITING
     prompt: str | None = None
     resume_schema: dict[str, Any] | None = None
@@ -111,6 +123,40 @@ class Continuation:
     )
     graph_id: str | None = None
     correlators: tuple[Correlator, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "resume_mode", ContinuationResumeMode(self.resume_mode))
+
+    @property
+    def interaction_prompt(self) -> str | dict[str, Any] | None:
+        """Return authored question data, including structured choice options.
+
+        The canonical prompt column is the text caption. Complete question data
+        is retained in the continuation setup payload and survives storage reload.
+
+        Examples:
+            Read structured choices:
+            ```python
+            choices = wait.interaction_prompt["choices"]
+            ```
+            Read a text-only continuation:
+            ```python
+            assert text_wait.interaction_prompt == "Material?"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | dict[str, Any] | None: Complete authored prompt, or the caption
+                for continuations with no question setup payload.
+
+        Notes:
+            This is a read projection, not a separately persisted question.
+        """
+        if self.payload is not None and "prompt" in self.payload:
+            return self.payload["prompt"]
+        return self.prompt
 
     @property
     def closed(self) -> bool:
@@ -182,6 +228,7 @@ class Continuation:
             "run_id": self.run_id,
             "node_id": self.node_id,
             "kind": self.kind,
+            "resume_mode": self.resume_mode.value,
             "status": self.status.value,
             "prompt": self.prompt,
             "resume_schema": self.resume_schema,

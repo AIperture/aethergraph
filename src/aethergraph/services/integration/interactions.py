@@ -12,8 +12,10 @@ from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.continuations.continuation import (
     Continuation,
     ContinuationQuery,
+    ContinuationStatus,
     Correlator,
 )
+from aethergraph.services.runner.facade import RunFacade
 
 
 class InteractionResolutionError(RuntimeError):
@@ -76,7 +78,7 @@ class ResolvedInteraction:
 class InteractionResolver:
     """Resolve exact callbacks or one eligible bound-session free-text wait."""
 
-    def __init__(self, continuation_store) -> None:
+    def __init__(self, continuation_store, *, run_manager=None) -> None:
         """Bind resolution to the Host continuation store.
 
         The resolver reads open continuation records but never uses correlator,
@@ -85,7 +87,7 @@ class InteractionResolver:
         Examples:
             Create a resolver:
             ```python
-            resolver = InteractionResolver(container.cont_store)
+            resolver = InteractionResolver(container.cont_store, run_manager=container.run_manager)
             ```
 
             Resolve during coordinator acceptance:
@@ -95,14 +97,19 @@ class InteractionResolver:
 
         Args:
             continuation_store: Store exposing the bounded continuation query contract.
+            run_manager: Canonical run owner for resolving descendant interactions.
+                Without it only the exact bound session can be resolved.
 
         Returns:
             None.
 
         Notes:
             Continuations bind public interaction IDs as exact indexed correlators.
+            Descendant authority is checked by the run facade using retained
+            submission lineage; channel addresses never grant session access.
         """
         self.store = continuation_store
+        self.run_manager = run_manager
 
     async def resolve(
         self,
@@ -112,8 +119,8 @@ class InteractionResolver:
     ) -> ResolvedInteraction | None:
         """Resolve zero or one exact open interaction for an ingress envelope.
 
-        Choice callbacks require their issued interaction ID. Free text and files
-        select by the durable AG session and reject multiple eligible waits.
+        Explicit responses require their issued interaction ID. Ordinary user
+        messages select by the durable AG session and reject multiple eligible waits.
 
         Examples:
             Resolve a button callback:
@@ -137,11 +144,15 @@ class InteractionResolver:
         Notes:
             Structured root input does not resume a text/file interaction implicitly.
         """
-        if envelope.choice is not None:
+        if envelope.input.type == "interaction.response":
             return await self.resolve_exact(
                 session_id=binding.ag_session_id,
-                interaction_id=envelope.choice.interaction_id,
-                expected_kinds={"approval", "choice"},
+                interaction_id=str(envelope.input.payload["interaction_id"]),
+                expected_kinds=(
+                    {"approval", "choice"}
+                    if envelope.choice is not None
+                    else self._eligible_kinds(envelope)
+                ),
             )
 
         eligible_kinds = self._eligible_kinds(envelope)
@@ -205,7 +216,7 @@ class InteractionResolver:
                 ```
 
         Args:
-            session_id: Exact AG session that owns the interaction.
+            session_id: Exact AG session that owns the interaction or its submitting ancestor.
             interaction_id: Public interaction identity emitted by Channel.
             expected_kinds: Continuation kinds accepted by the response.
         Returns:
@@ -214,8 +225,56 @@ class InteractionResolver:
         Notes:
             Continuation tokens remain private. Resolution never guesses by newest
             wait, Channel prefix, or correlator.
+            Descendant questions require an explicit interaction identity. Ordinary
+            free text only considers waits owned directly by the bound session.
         """
 
+        resolved = await self.inspect_exact(session_id=session_id, interaction_id=interaction_id)
+        wait = resolved.continuation
+        if wait.closed or (wait.deadline is not None and wait.deadline <= datetime.now(UTC)):
+            raise InteractionResolutionError(
+                code="integration.interaction_not_found",
+                message="The supplied interaction identity is not open.",
+            )
+        if wait.kind not in expected_kinds:
+            raise InteractionResolutionError(
+                code="integration.interaction_kind_mismatch",
+                message="The interaction does not accept this response kind.",
+            )
+        return resolved
+
+    async def inspect_exact(self, *, session_id: str, interaction_id: str) -> ResolvedInteraction:
+        """Read one retained question through the same ownership boundary as answers.
+
+        Inspection includes terminal questions and never resumes execution or
+        exposes a continuation token. Callers may inspect a known descendant
+        question only through its retained submission lineage.
+
+        Examples:
+            Read an open question:
+            ```python
+            question = await resolver.inspect_exact(
+                session_id="parent", interaction_id="question-1",
+            )
+            ```
+            Read its retained terminal state:
+            ```python
+            final = await resolver.inspect_exact(
+                session_id="parent", interaction_id=question.interaction_id,
+            )
+            ```
+
+        Args:
+            session_id: Question owner's session or an authorized submitting ancestor.
+            interaction_id: Exact public question identity.
+
+        Returns:
+            ResolvedInteraction: Retained canonical continuation and public identity.
+
+        Notes:
+            Unknown, ambiguous and unauthorized identities raise resolution errors.
+            The caller interprets deadline eligibility without mutating the record.
+        """
         correlator = Correlator(
             scheme="interaction",
             channel="public",
@@ -226,7 +285,7 @@ class InteractionResolver:
                 await self.store.query(
                     ContinuationQuery(
                         correlator=correlator,
-                        open_at=datetime.now(UTC),
+                        statuses=tuple(ContinuationStatus),
                         limit=2,
                     )
                 )
@@ -235,7 +294,7 @@ class InteractionResolver:
         if not exact:
             raise InteractionResolutionError(
                 code="integration.interaction_not_found",
-                message="The supplied interaction identity is not open.",
+                message="The supplied interaction identity was not found.",
             )
         if len(exact) > 1:
             raise InteractionResolutionError(
@@ -243,15 +302,21 @@ class InteractionResolver:
                 message="The supplied interaction identity is not unique.",
             )
         wait = exact[0]
-        if wait.session_id != session_id:
+        owned = wait.session_id == session_id
+        if not owned and self.run_manager is not None:
+            try:
+                record = await RunFacade(
+                    self.run_manager,
+                    session_id=session_id,
+                ).inspect_run(wait.run_id)
+            except LookupError:
+                owned = False
+            else:
+                owned = record.session_id == wait.session_id
+        if not owned:
             raise InteractionResolutionError(
                 code="integration.interaction_session_mismatch",
                 message="The interaction does not belong to the bound AG session.",
-            )
-        if wait.kind not in expected_kinds:
-            raise InteractionResolutionError(
-                code="integration.interaction_kind_mismatch",
-                message="The interaction does not accept this response kind.",
             )
         return ResolvedInteraction(
             interaction_id=interaction_id,
@@ -329,7 +394,7 @@ def build_interaction_payload(
     if envelope.choice is not None:
         raw_choice = envelope.choice.option_ids[0]
         normalized = normalize_choice_reply(
-            prompt=continuation.prompt,
+            prompt=continuation.interaction_prompt,
             raw_choice=raw_choice,
             raw_text=envelope.text or "",
         )

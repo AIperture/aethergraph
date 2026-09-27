@@ -67,13 +67,14 @@ async def test_send_structured_output_rejects_empty_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_tool_activity_preserves_structured_identity() -> None:
+@pytest.mark.parametrize("status", ["completed", "dispatched", "queued", "submission_unknown"])
+async def test_send_tool_activity_preserves_structured_identity(status) -> None:
     ctx = _FakeContext()
 
     await ChannelSession(ctx).send_tool_activity(
         tool_call_id="call-1",
         tool_name="inspect_project",
-        status="completed",
+        status=status,
         message="Project inspected.",
     )
 
@@ -83,7 +84,7 @@ async def test_send_tool_activity_preserves_structured_identity() -> None:
     assert event.rich == {
         "tool_call_id": "call-1",
         "tool_name": "inspect_project",
-        "status": "completed",
+        "status": status,
         "message": "Project inspected.",
     }
     assert event.meta["run_id"] == "run-1"

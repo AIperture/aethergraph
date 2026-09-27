@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.trigger import TriggerKind
+from aethergraph.core.runtime.run_types import RunParent
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
@@ -15,7 +17,8 @@ class TriggerRecord:
 
     Triggers are "scopeful": they remember enough identity / context so that
     runs they spawn share the same behavior for memory, artifacts, and KB
-    as the scope at trigger-creation time (minus run/node IDs).
+    as the scope at trigger-creation time. Each execution gets new run/node
+    identities; the creating run remains a separate parent provenance link.
     """
 
     trigger_id: str
@@ -73,6 +76,23 @@ class TriggerRecord:
     # Freeform metadata for UI / debugging
     meta: dict[str, Any] = field(default_factory=dict)
 
+    origin_binding: OriginBinding | None = None
+    parent_run: RunParent | None = None
+
+    def __post_init__(self) -> None:
+        if self.parent_run is not None:
+            if isinstance(self.parent_run, dict):
+                self.parent_run = RunParent(**self.parent_run)
+            if (
+                not isinstance(self.parent_run, RunParent)
+                or self.parent_run.session_id != self.session_id
+            ):
+                raise ValueError("Trigger parent run must match its session")
+        if self.origin_binding is not None:
+            self.origin_binding = OriginBinding.model_validate(self.origin_binding)
+            if self.origin_binding.session_id != self.session_id:
+                raise ValueError("Trigger origin binding must match its session")
+
     # -------------- helpers --------------
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable trigger service projection.
@@ -119,6 +139,10 @@ class TriggerRecord:
             "graph_id": self.graph_id,
             "default_inputs": self.default_inputs,
             "origin": self.origin,
+            "parent_run": asdict(self.parent_run) if self.parent_run is not None else None,
+            "origin_binding": None
+            if self.origin_binding is None
+            else self.origin_binding.model_dump(mode="json"),
             "kind": self.kind,
             "cron_expr": self.cron_expr,
             "interval_seconds": self.interval_seconds,
@@ -136,6 +160,35 @@ class TriggerRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TriggerRecord:
+        """Restore a trigger and validate its retained channel origin.
+
+        Parse persisted timestamps and reconstruct the typed origin binding in
+        the record's validation boundary.
+
+        Examples:
+            Restore a stored record:
+            ```python
+            restored = TriggerRecord.from_dict(trigger.to_dict())
+            assert restored.trigger_id == trigger.trigger_id
+            ```
+
+            Preserve the channel route:
+            ```python
+            restored = TriggerRecord.from_dict(trigger.to_dict())
+            assert restored.origin_binding == trigger.origin_binding
+            ```
+
+        Args:
+            data: Serialized trigger service record.
+
+        Returns:
+            TriggerRecord: Validated scope, schedule and launch context.
+
+        Notes:
+            Records without an origin binding retain no implicit channel route.
+            A binding for another session is rejected.
+        """
+
         def _dt(v: Any) -> datetime | None:
             if v is None:
                 return None
@@ -157,6 +210,8 @@ class TriggerRecord:
             graph_id=data.get("graph_id"),
             default_inputs=data.get("default_inputs") or {},
             origin=data.get("origin", "schedule"),
+            parent_run=data.get("parent_run"),
+            origin_binding=data.get("origin_binding"),
             kind=data.get("kind", "cron"),
             cron_expr=data.get("cron_expr"),
             interval_seconds=data.get("interval_seconds"),
@@ -191,9 +246,57 @@ class TriggerRecord:
         max_overlap_runs: int | None = None,
         catch_up_missed: bool = False,
         meta: dict[str, Any] | None = None,
+        origin_binding: OriginBinding | None = None,
     ) -> TriggerRecord:
-        """
-        Build a TriggerRecord from a Scope, intentionally omitting run_id/node_id.
+        """Build a scoped trigger with the originating run retained as its parent.
+
+        Retain tenant, session and Agent identity together with an optional
+        immutable channel route for later scheduled executions. A new scheduled
+        run has its own identity and a parent link to the original creating run.
+
+        Examples:
+            Build an interval schedule:
+            ```python
+            trigger = TriggerRecord.from_scope(
+                trigger_id="trigger-1", scope=scope, graph_id="poll",
+                default_inputs={}, kind="interval", interval_seconds=10,
+            )
+            ```
+
+            Retain a session's output route:
+            ```python
+            trigger = TriggerRecord.from_scope(
+                trigger_id="trigger-2", scope=scope, graph_id="notify",
+                default_inputs={}, kind="event", event_key="job.done",
+                origin_binding=origin_binding,
+            )
+            ```
+
+        Args:
+            trigger_id: Exact trigger identity.
+            scope: Tenant, session and Agent scope to retain.
+            graph_id: Registered graph to execute.
+            default_inputs: Base inputs for scheduled execution.
+            kind: Schedule discriminator.
+            trigger_name: Optional display label.
+            origin: Scheduling origin metadata.
+            cron_expr: Cron expression for cron schedules.
+            interval_seconds: Interval cadence in seconds.
+            run_at: One-shot due time.
+            event_key: Event name for event schedules.
+            tz: Optional scheduling time zone.
+            max_overlap_runs: Optional simultaneous-run limit.
+            catch_up_missed: Whether restart recovers missed occurrences.
+            meta: Caller metadata.
+            origin_binding: Optional session-matching channel origin.
+
+        Returns:
+            TriggerRecord: Record ready for scheduling validation and persistence.
+
+        Notes:
+            Channel routes never select a different session. Run and node identity
+            are supplied anew when the scheduler admits an execution. When both
+            exist, the creating run/session are retained only as parent provenance.
         """
         return cls(
             trigger_id=trigger_id,
@@ -208,6 +311,10 @@ class TriggerRecord:
             graph_id=graph_id,
             default_inputs=dict(default_inputs or {}),
             origin=origin,
+            parent_run=RunParent(scope.run_id, scope.session_id)
+            if scope.run_id and scope.session_id
+            else None,
+            origin_binding=origin_binding,
             kind=kind,
             trigger_name=trigger_name,
             cron_expr=cron_expr,

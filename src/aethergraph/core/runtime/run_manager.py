@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 import json
 import logging
+import math
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -14,6 +15,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.core.runtime.run_cancellation import (
+    LocalTaskCancellationAdapter,
     RunCancellationHandle,
     RunCancellationRegistry,
     RunCancellationRequestedError,
@@ -23,6 +25,7 @@ from aethergraph.core.runtime.run_types import (
     RunAdmissionError,
     RunImportance,
     RunOrigin,
+    RunParent,
     RunRecord,
     RunResult,
     RunStatus,
@@ -162,6 +165,90 @@ class RunManager:
         )  # no need for thread lock because run_manager is used within event loop
         self._session_root_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_root_turn_locks_lock = asyncio.Lock()
+        self._background_tasks: dict[str, asyncio.Task] = {}
+        self._owned_run_ids: set[str] = set()
+        self._closing = False
+        self._admissions_in_progress = 0
+        self._admissions_drained = asyncio.Event()
+        self._admissions_drained.set()
+
+    def _begin_admission(self) -> None:
+        if self._closing:
+            raise RuntimeError("Run manager is shutting down; new runs are unavailable")
+        self._admissions_in_progress += 1
+        self._admissions_drained.clear()
+
+    def _end_admission(self) -> None:
+        self._admissions_in_progress -= 1
+        if self._admissions_in_progress == 0:
+            self._admissions_drained.set()
+
+    def _background_finished(self, run_id: str, task: asyncio.Task) -> None:
+        self._background_tasks.pop(run_id, None)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            _log.error(
+                "Owned run execution failed run_id=%s",
+                run_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        elif not task.cancelled():
+            record, _, waiting, _ = task.result()
+            if not waiting and record.status in {
+                RunStatus.succeeded,
+                RunStatus.failed,
+                RunStatus.canceled,
+            }:
+                self._owned_run_ids.discard(run_id)
+
+    async def close(self, *, timeout_s: float = 30.0) -> None:
+        """Stop admission, cancel owned runs, and join their execution tasks.
+
+        Examples:
+            Retire an embedded runtime:
+                ```python
+                await manager.close()
+                ```
+
+            Bound a Host shutdown:
+                ```python
+                await manager.close(timeout_s=10)
+                ```
+
+        Args:
+            timeout_s: Finite positive deadline for cancellation and joining.
+
+        Returns:
+            None: Every submitted execution owned by this manager has settled.
+
+        Notes:
+            A timeout is an explicit shutdown failure. It does not claim physical
+            termination or permit closing storage still used by live executions.
+            Repeated calls can finish a previously timed-out shutdown.
+        """
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("timeout_s must be finite and positive")
+        if asyncio.current_task() in self._background_tasks.values():
+            raise RuntimeError("An owned run cannot close its own run manager")
+        self._closing = True
+        async with asyncio.timeout(timeout_s):
+            # Drain admissions first: an accepted callback may be persisting its
+            # launch receipt. It must finish before its execution is cancelled.
+            await self._admissions_drained.wait()
+            pending = tuple(self._background_tasks.items())
+            results = await asyncio.gather(
+                *(
+                    self.cancel_run(run_id, reason="parent_cancelled")
+                    for run_id in tuple(self._owned_run_ids)
+                ),
+                return_exceptions=True,
+            )
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                raise RuntimeError("Owned run cancellation failed") from failures[0]
+            await asyncio.gather(
+                *(asyncio.shield(task) for _, task in pending), return_exceptions=True
+            )
+            self._owned_run_ids.clear()
 
     # -------- concurrency helpers --------
     async def _acquire_run_slot(self) -> None:
@@ -320,7 +407,7 @@ class RunManager:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 _log.warning(
-                    "session root-turn barrier timed out; admitting run",
+                    "session root-turn barrier timed out; admission rejected",
                     extra={
                         "session_id": session_id,
                         "graph_id": graph_id,
@@ -329,29 +416,34 @@ class RunManager:
                         "blocked_status": _run_status_text(blocker.status),
                     },
                 )
-                return
+                raise TimeoutError(
+                    f"Session {session_id!r} is still executing root run "
+                    f"{blocker.run_id!r}; retry admission after it settles."
+                )
             await asyncio.sleep(min(_SESSION_ROOT_TURN_BARRIER_POLL_S, remaining))
 
     async def _find_session_root_turn_blocker(self, *, session_id: str) -> RunRecord | None:
         if self._store is None:
             return None
         try:
-            records = await self._store.list(session_id=session_id, limit=25)
+            for status in sorted(_SESSION_ROOT_TURN_BARRIER_STATUSES, key=lambda item: item.value):
+                offset = 0
+                while True:
+                    records = await self._store.list(
+                        session_id=session_id, status=status, limit=100, offset=offset
+                    )
+                    for record in records:
+                        if self._is_session_root_turn_record(record):
+                            return record
+                    if len(records) < 100:
+                        break
+                    offset += len(records)
         except Exception:
             _log.exception(
                 "session root-turn barrier failed to list runs",
                 extra={"session_id": session_id},
             )
-            return None
-        for record in records:
-            status = _run_status(record.status)
-            if status not in _SESSION_ROOT_TURN_BARRIER_STATUSES:
-                continue
-            # Non-root records may legitimately be newer than the prior root
-            # turn in the same session. Keep scanning until we find a visible
-            # root turn that can still be mutating shared session state.
-            if self._is_session_root_turn_record(record):
-                return record
+            raise
         return None
 
     # -------- registry helpers --------
@@ -431,7 +523,7 @@ class RunManager:
             logging.getLogger("aethergraph.runtime.run_manager").exception(
                 "Error persisting durable run outputs for run_id=%s", record.run_id
             )
-            return None
+            raise
 
     async def _recover_outputs_from_snapshot(
         self,
@@ -599,6 +691,10 @@ class RunManager:
         if session_id is None:
             session_id = rid
 
+        parent_config = (run_config or {}).get("parent_run")
+        parent = RunParent(**dict(parent_config)) if parent_config is not None else None
+        if parent is not None and parent.run_id == rid:
+            raise ValueError("A run cannot be its own parent")
         record = RunRecord(
             run_id=rid,
             graph_id=graph_id,
@@ -615,6 +711,7 @@ class RunManager:
             importance=importance or RunImportance.normal,
             agent_id=agent_id,
             app_id=app_id,
+            parent=parent,
         )
 
         if flow_id:
@@ -682,6 +779,16 @@ class RunManager:
         handle = await self._ensure_cancellation_handle(record.run_id)
 
         try:
+            # Graph functions have no scheduler. Bind cancellation only after the
+            # worker enters this protected lifetime, so pre-start cancellation
+            # still finalizes the durable run and releases its admission slot.
+            if _is_graphfn(target):
+                task = asyncio.current_task()
+                assert task is not None
+                handle.register_adapter(
+                    LocalTaskCancellationAdapter(task), adapter_kind="local_task"
+                )
+            handle.raise_if_cancel_requested()
             result = await run_or_resume_async(
                 target,
                 inputs or {},
@@ -708,6 +815,13 @@ class RunManager:
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
                 )
+            # Publish success only after durable outputs are readable. Observers
+            # must never see terminal success while result persistence is pending.
+            await self._persist_run_result(
+                record=record,
+                outputs=outputs,
+                source="direct",
+            )
             if self._store is not None:
                 await self._store.update_status(
                     record.run_id,
@@ -716,11 +830,6 @@ class RunManager:
                     error=record.error,
                     meta_update=dict(record.meta),
                 )
-            await self._persist_run_result(
-                record=record,
-                outputs=outputs,
-                source="direct",
-            )
 
         except (asyncio.CancelledError, RunCancellationRequestedError):
             # Cancellation path: scheduler.terminate() or external cancel.
@@ -891,6 +1000,7 @@ class RunManager:
         app_name: str | None = None,
         run_config: dict[str, Any] | None = None,
         admission_callback: Callable[[RunRecord], Awaitable[None]] | None = None,
+        count_slot: bool = True,
     ) -> RunRecord:
         """Persist and admit one run before scheduling background execution.
 
@@ -923,6 +1033,8 @@ class RunManager:
             run_config: Optional trusted runtime configuration.
             admission_callback: Optional Host callback invoked after durable run creation
                 and before execution becomes eligible to start.
+            count_slot: Whether this admission consumes independent run capacity.
+                Nested waiting orchestration passes false to avoid capacity deadlock.
 
         Returns:
             RunRecord: Persisted and admitted run metadata.
@@ -937,23 +1049,31 @@ class RunManager:
         # Gate before creating the RunRecord. Once this method persists a root
         # run, that record itself becomes the blocker for later same-session
         # root turns; the in-process lock only closes the check/create race.
-        admission_lock = await self._acquire_session_root_turn_admission(
-            session_id=session_id,
-            graph_id=graph_id,
-            run_id=run_id,
-            tags=tags,
-            origin=origin,
-            visibility=visibility,
-            run_config=run_config,
-        )
+        self._begin_admission()
+        try:
+            admission_lock = await self._acquire_session_root_turn_admission(
+                session_id=session_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                tags=tags,
+                origin=origin,
+                visibility=visibility,
+                run_config=run_config,
+            )
+        except BaseException:
+            self._end_admission()
+            raise
         # Acquire run slot (rate limiting)
         # Tracks whether responsibility for releasing the slot has been handed
         # over to the background runner (_bg). If False, submit_run must
         # release the slot on exception; if True, _bg will do it its finally.
         slot_handed_to_bg = False
+        slot_acquired = False
 
         try:
-            await self._acquire_run_slot()
+            if count_slot:
+                await self._acquire_run_slot()
+                slot_acquired = True
             tags = tags or []
 
             record: RunRecord | None = None
@@ -1079,31 +1199,32 @@ class RunManager:
                     }
                     if run_config is not None:
                         finalize_kwargs["run_config"] = run_config
-                    await self._run_and_finalize(
+                    return await self._run_and_finalize(
                         **finalize_kwargs,
                     )
                 finally:
-                    await self._release_run_slot()
+                    if slot_acquired:
+                        await self._release_run_slot()
 
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                slot_handed_to_bg = True
-                await _bg()
-            else:
-                slot_handed_to_bg = True
-                loop.create_task(_bg())
+            task = asyncio.create_task(_bg(), name=f"ag-run:{record.run_id}")
+            self._owned_run_ids.add(record.run_id)
+            self._background_tasks[record.run_id] = task
+            task.add_done_callback(
+                lambda completed: self._background_finished(record.run_id, completed)
+            )
+            slot_handed_to_bg = True
 
             return record
 
-        except Exception:
+        except BaseException:
             # If submit_run itself fails *before* handing off to _bg, we must release the slot here.
             # Once slot_handed_to_bg is True, _bg is responsible for releasing the slot.
-            if not slot_handed_to_bg:
+            if slot_acquired and not slot_handed_to_bg:
                 await self._release_run_slot()
             raise
         finally:
             self._release_session_root_turn_admission(admission_lock)
+            self._end_admission()
 
     async def run_and_wait(
         self,
@@ -1123,86 +1244,71 @@ class RunManager:
         run_config: dict[str, Any] | None = None,
         count_slot: bool = False,  # important for nested orchestration
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """Admit through the common executor and wait for this execution slice.
+
+        Examples:
+            Wait for a registered graph:
+                ```python
+                record, outputs, waiting, continuations = await manager.run_and_wait(
+                    "analysis", inputs={"topic": "airflow"}
+                )
+                ```
+
+            Count an independent top-level execution against capacity:
+                ```python
+                result = await manager.run_and_wait("analysis", inputs={}, count_slot=True)
+                ```
+
+        Args:
+            graph_id: Exact registered graph identity.
+            inputs: Validated graph inputs.
+            run_id: Optional caller-assigned identity.
+            session_id: Optional session for admission serialization.
+            tags: Run classification tags.
+            identity: Authenticated runtime identity.
+            origin: Run origin.
+            visibility: Run visibility.
+            importance: Retention importance.
+            agent_id: Owning Agent identity.
+            app_id: Owning application identity.
+            app_name: Application display name.
+            run_config: Trusted runtime configuration.
+            count_slot: Count independent execution capacity; nested waiting calls
+                retain the existing false default to avoid capacity deadlock.
+
+        Returns:
+            tuple: Record, outputs, waiting flag, and continuation descriptors.
+
+        Notes:
+            Waiting is caller behavior over `submit_run`, not another executor.
+            Unlike `wait_run`, this method returns when the execution parks on a
+            continuation. Cancelling this owning call requests child cancellation;
+            cancelling a read-only `wait_run` observer does not.
         """
-        Blocking run that still goes through RunStore so UI can visualize it.
-
-        - Creates + persists RunRecord (status=running)
-        - Runs inline (awaits completion)
-        - Updates RunStore status + metering (via _run_and_finalize)
-        - Returns (record, outputs, has_waits, continuations)
-
-        count_slot=False is recommended for "parent run awaiting child run" orchestration
-        to avoid deadlocks when max_concurrent_runs is small.
-        """
-        if identity is None:
-            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
-
-        # run_and_wait also creates persisted root records, so it participates
-        # in the same session admission semantics as submit_run. The lock is
-        # released immediately after record creation; execution can still run
-        # inline while later root turns observe this record in the store.
-        admission_lock = await self._acquire_session_root_turn_admission(
-            session_id=session_id,
-            graph_id=graph_id,
+        record = await self.submit_run(
+            graph_id,
+            inputs=inputs,
             run_id=run_id,
+            session_id=session_id,
             tags=tags,
+            identity=identity,
             origin=origin,
             visibility=visibility,
+            importance=importance,
+            agent_id=agent_id,
+            app_id=app_id,
+            app_name=app_name,
             run_config=run_config,
+            count_slot=count_slot,
         )
+        # submit_run returns immediately after task registration without yielding.
+        # Capture the exact execution before its done callback removes ownership.
+        task = self._background_tasks[record.run_id]
         try:
-            if count_slot:
-                await self._acquire_run_slot()
-            tags = tags or []
-
-            record, target = await self._build_run_record(
-                graph_id=graph_id,
-                inputs=inputs,
-                run_id=run_id,
-                session_id=session_id,
-                tags=tags,
-                identity=identity,
-                origin=origin,
-                visibility=visibility,
-                importance=importance,
-                agent_id=agent_id,
-                app_id=app_id,
-                app_name=app_name,
-                run_config=run_config,
-            )
-
-            # Optional: UI-only input preview
-            try:
-                preview, truncated = _make_preview(inputs)
-                record.meta["input_preview"] = preview
-                record.meta["input_truncated"] = truncated
-            except Exception:
-                import logging
-
-                logging.getLogger("aethergraph.runtime.run_manager").exception(
-                    "Error creating input preview for run_id=%s", record.run_id
-                )
-
-            if self._store is not None:
-                await self._store.create(record)
-            self._release_session_root_turn_admission(admission_lock)
-            admission_lock = None
-            await self._ensure_cancellation_handle(record.run_id)
-
-            finalize_kwargs = {
-                "record": record,
-                "target": target,
-                "graph_id": graph_id,
-                "inputs": inputs,
-                "identity": identity,
-            }
-            if run_config is not None:
-                finalize_kwargs["run_config"] = run_config
-            return await self._run_and_finalize(**finalize_kwargs)
-        finally:
-            self._release_session_root_turn_admission(admission_lock)
-            if count_slot:
-                await self._release_run_slot()
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await self.cancel_run(record.run_id, reason="parent_cancelled")
+            raise
 
     async def get_record(self, run_id: str) -> RunRecord | None:
         if self._store is None:
@@ -1279,7 +1385,7 @@ class RunManager:
 
         Args:
             run_id: Exact run identity to cancel.
-            reason: Exact supported cancellation cause.
+            reason: Supported user_requested, parent_cancelled or timeout cause.
 
         Returns:
             RunRecord | None: Current run record when present, otherwise
@@ -1291,7 +1397,7 @@ class RunManager:
         """
 
         reason = str(reason or "")
-        if reason not in {"user_requested", "parent_cancelled"}:
+        if reason not in {"user_requested", "parent_cancelled", "timeout"}:
             raise ValueError(f"Unsupported cancellation reason: {reason}")
         record: RunRecord | None = None
         if self._store is not None:
@@ -1359,6 +1465,16 @@ class RunManager:
                 ),
             )
 
+            # Finalization may have won the status CAS while cancellation was
+            # being requested. Return its evidence without signalling a finished task.
+            current = await self._store.get(run_id)
+            if current is not None and current.status in {
+                RunStatus.succeeded,
+                RunStatus.failed,
+                RunStatus.canceled,
+            }:
+                return current
+
         has_adapter = handle.adapter_kind not in {None, "none"}
         await handle.request_cancel(reason=reason)
         if not has_adapter:
@@ -1396,36 +1512,69 @@ class RunManager:
         timeout_s: float | None = None,
         return_outputs: bool = False,
     ) -> RunRecord | tuple[RunRecord, dict[str, Any] | None]:
+        """Observe a run without transferring cancellation to its shared waiter.
+
+        Reads durable state between bounded waits, so completion in another runtime
+        process and completion racing with waiter registration are both observable.
+
+        Examples:
+            Read completion and its durable outputs:
+                ```python
+                record, output = await manager.wait_run("run-1", return_outputs=True)
+                ```
+
+            Bound only this observer's wait:
+                ```python
+                record = await manager.wait_run("run-1", timeout_s=5)
+                ```
+
+        Args:
+            run_id: Exact run identity visible to this manager.
+            timeout_s: Optional positive observer deadline in seconds.
+            return_outputs: Whether to include the final successful graph outputs.
+
+        Returns:
+            RunRecord | tuple[RunRecord, dict[str, Any] | None]: Terminal record,
+                optionally paired with successful outputs; failed/cancelled runs
+                have no successful output.
+
+        Notes:
+            Observer timeout or cancellation never cancels the run or another
+            observer. Unknown runs raise LookupError; timeout raises TimeoutError.
         """
-        Wait for a run to reach a terminal state.
-
-        - If return_outputs=False (default), returns RunRecord (backwards compatible).
-        - If return_outputs=True, returns (RunRecord, outputs_dict_or_none).
-
-        Output semantics when return_outputs=True:
-        - succeeded: returns durable final graph outputs when available
-          (prefer in-memory completion data, then persisted run results, then
-          snapshot-based recovery as a fallback)
-        - failed / canceled: returns (record, None)
-
-        This keeps wait_run useful across process boundaries instead of limiting
-        output retrieval to only in-process waiters.
-        """
-        # Fast path: already terminal in store
-        rec = await self.get_record(run_id)
-        if rec and rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
-            if return_outputs:
-                if rec.status == RunStatus.succeeded:
-                    return rec, await self._durable_outputs_for_record(rec)
-                return rec, None
-            return rec
-
-        fut = await self._get_or_create_run_future(run_id)
-
-        if timeout_s is not None:
-            result = await asyncio.wait_for(fut, timeout=timeout_s)
-        else:
-            result = await fut
+        if timeout_s is not None and (not math.isfinite(timeout_s) or timeout_s <= 0):
+            raise ValueError("timeout_s must be finite and positive")
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        fut = None
+        while True:
+            rec = await self.get_record(run_id)
+            if rec is None:
+                raise LookupError(f"Run {run_id!r} does not exist")
+            if rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+                if return_outputs:
+                    outputs = (
+                        await self._durable_outputs_for_record(rec)
+                        if rec.status == RunStatus.succeeded
+                        else None
+                    )
+                    return rec, outputs
+                return rec
+            if fut is None:
+                fut = await self._get_or_create_run_future(run_id)
+                # Re-read after registration to close the completion/register race.
+                continue
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"Run {run_id!r} has not completed")
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(fut),
+                    timeout=0.5 if remaining is None else min(0.5, remaining),
+                )
+                break
+            except TimeoutError:
+                continue
 
         # result is either:
         # - RunRecord (old-style resolvers)
@@ -1480,134 +1629,53 @@ class RunManager:
         app_name: str | None = None,
         run_config: dict[str, Any] | None = None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """Start and await a run through the common admission path.
+
+        Examples:
+            Execute from a CLI:
+                ```python
+                record, outputs, waiting, continuations = await manager.start_run(
+                    "analysis", inputs={"topic": "airflow"}
+                )
+                ```
+
+            Bind a known session:
+                ```python
+                result = await manager.start_run("analysis", inputs={}, session_id="s-1")
+                ```
+
+        Args:
+            graph_id: Registered graph identity.
+            inputs: Graph input mapping.
+            run_id: Optional caller-owned run identity.
+            session_id: Optional session, defaulting to the allocated run identity.
+            tags: Run classification tags.
+            identity: Authenticated runtime identity.
+            agent_id: Optional owning Agent identity.
+            app_id: Optional application identity.
+            app_name: Optional application display name.
+            run_config: Trusted runtime configuration.
+
+        Returns:
+            tuple: Record, outputs, waiting flag, and continuation descriptors.
+
+        Notes:
+            This public adapter preserves the CLI session default without owning
+            another record builder, executor, or completion path.
         """
-        Blocking helper (original behaviour).
-
-        - Resolves target.
-        - Creates RunRecord with status=running.
-        - Runs once via run_or_resume_async.
-        - Updates store + metering.
-        - Returns (record, outputs, has_waits, continuations).
-
-        Still useful for tests/CLI, but the HTTP route should prefer submit_run().
-
-        NOTE:
-        agent_id and app_id will override any value pulled from original graphs. Use it
-        only when you want to explicitly set these fields for tracking purpose.
-        """
-        if identity is None:
-            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
-
-        tags = tags or []
-        tenant = registry_tenant_from_identity(identity)
-        self._resolve_target_identity = identity
-        try:
-            target = await self._resolve_target(graph_id)
-        finally:
-            self._resolve_target_identity = None
         rid = run_id or f"run-{uuid4().hex[:12]}"
-        started_at = _utcnow()
-
-        if _is_task_graph(target):
-            kind = "taskgraph"
-        elif _is_graphfn(target):
-            kind = "graphfn"
-        else:
-            kind = "other"
-
-        # pull flow_id and entrypoint from registry if possible
-        flow_id: str | None = None
-        reg = self.registry()
-        if reg is not None:
-            if kind == "taskgraph":
-                meta = (
-                    reg.get_meta(
-                        nspace="graph",
-                        name=graph_id,
-                        version=None,
-                        tenant=tenant,
-                        include_global=True,
-                    )
-                    or {}
-                )
-            elif kind == "graphfn":
-                meta = (
-                    reg.get_meta(
-                        nspace="graphfn",
-                        name=graph_id,
-                        version=None,
-                        tenant=tenant,
-                        include_global=True,
-                    )
-                    or {}
-                )
-            else:
-                meta = {}
-            flow_id = meta.get("flow_id") or graph_id
-
-        # use run_id as session_id if not provided
-        if session_id is None:
-            session_id = rid
-
-        record = RunRecord(
+        return await self.run_and_wait(
+            graph_id,
+            inputs=inputs,
             run_id=rid,
-            graph_id=graph_id,
-            kind=kind,
-            status=RunStatus.running,  # we go straight to running as before
-            started_at=started_at,
-            tags=list(tags),
-            user_id=identity.user_id,
-            org_id=identity.org_id,
-            meta={},
-            session_id=session_id,
-            origin=RunOrigin.app,  # app is a typical default for graph runs
+            session_id=session_id if session_id is not None else rid,
+            tags=tags,
+            identity=identity,
+            origin=RunOrigin.app,
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
             agent_id=agent_id,
             app_id=app_id,
-        )
-
-        if flow_id:
-            record.meta["flow_id"] = flow_id
-            if f"flow:{flow_id}" not in record.tags:
-                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
-        if session_id:
-            record.meta["session_id"] = session_id
-            if f"session:{session_id}" not in record.tags:
-                record.tags.append(f"session:{session_id}")  # add session tag if missing
-
-        record.meta["original_inputs"] = _clone_jsonish_dict(inputs)
-        record.meta["original_run_config"] = _clone_jsonish_dict(run_config)
-        record.meta["original_tags"] = list(tags or [])
-        record.meta["original_session_id"] = session_id
-        record.meta["original_app_id"] = app_id
-        if app_name:
-            record.meta["app_name"] = app_name
-        if agent_id:
-            record.meta["agent_id"] = agent_id
-
-        resume_from_run_id = run_config.get("resume_from_run_id") if run_config else None
-        resume_mode = run_config.get("resume_mode") if run_config else None
-        if resume_from_run_id:
-            record.meta["resume_from_run_id"] = resume_from_run_id
-        if resume_mode:
-            record.meta["resume_mode"] = resume_mode
-
-        if self._store is not None:
-            await self._store.create(record)
-        await self._ensure_cancellation_handle(record.run_id)
-
-        finalize_kwargs = {
-            "record": record,
-            "target": target,
-            "graph_id": graph_id,
-            "inputs": inputs,
-            "identity": identity,
-        }
-        if run_config is not None:
-            finalize_kwargs["run_config"] = run_config
-        return await self._run_and_finalize(
-            **finalize_kwargs,
-            # agent_id=agent_id,
-            # app_id=app_id,
+            app_name=app_name,
+            run_config=run_config,
         )

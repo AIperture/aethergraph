@@ -53,6 +53,8 @@ class RunRecord:
     scope: StorageScope
     revision: int
     started_at: datetime
+    parent_run_id: str | None = None
+    parent_session_id: str | None = None
     finished_at: datetime | None = None
     tags: tuple[str, ...] = ()
     error: str | None = None
@@ -69,6 +71,12 @@ class RunRecord:
         _nonempty("run_id", self.run_id)
         _nonempty("graph_id", self.graph_id)
         _nonempty("kind", self.kind)
+        _optional_nonempty("parent_run_id", self.parent_run_id)
+        _optional_nonempty("parent_session_id", self.parent_session_id)
+        if (self.parent_run_id is None) != (self.parent_session_id is None):
+            raise ValueError("Run parent requires both run and session identities")
+        if self.parent_run_id == self.run_id:
+            raise ValueError("Run cannot be its own parent")
         self.scope.require("run_id", "graph_id")
         if self.scope.run_id != self.run_id or self.scope.graph_id != self.graph_id:
             raise ValueError("run_id and graph_id must match canonical scope")
@@ -228,8 +236,10 @@ class RunQuery:
     page: PageRequest = PageRequest()
     statuses: tuple[RunStatus, ...] = ()
     kinds: tuple[str, ...] = ()
+    parent_run_id: str | None = None
 
     def __post_init__(self) -> None:
+        _optional_nonempty("parent_run_id", self.parent_run_id)
         for name, values in (("statuses", self.statuses), ("kinds", self.kinds)):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -454,6 +464,10 @@ class RunResultRepository(Protocol):
 
         Notes:
             The provider coordinates run `result_available` updates transactionally.
+            Accept results while the owning run is running, before the runtime
+            publishes terminal success; also allow successful-result refinement.
+            Reject pending, waiting, failed and cancellation states. Availability
+            alone does not establish terminal success.
         """
         ...
 

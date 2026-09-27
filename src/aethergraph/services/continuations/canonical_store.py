@@ -276,6 +276,8 @@ class CanonicalContinuationStore:
             raise StorageNotFoundError(continuation.continuation_id)
         if current.revision != expected_revision:
             raise StorageConflictError("Continuation revision is stale")
+        if _to_runtime(current).resume_mode != continuation.resume_mode:
+            raise StorageConflictError("Continuation response delivery is immutable")
         record = _to_canonical_record(
             continuation,
             owner_scope=self._owner_scope,
@@ -865,6 +867,7 @@ def _to_runtime(record: CanonicalContinuation) -> Continuation:
         run_id=str(record.scope.run_id),
         node_id=str(record.scope.node_id),
         kind=record.kind,
+        resume_mode=service.get("resume_mode", "runtime"),
         status=ContinuationStatus(record.status.value),
         prompt=record.prompt,
         resume_schema=(None if "resume_schema" in nulls else _plain_mapping(record.resume_schema)),
@@ -894,7 +897,8 @@ def _service_metadata(
 ) -> dict[str, Any]:
     metadata = _plain(base or {})
     metadata[_SERVICE_CONTEXT] = {
-        _NULL_FIELDS: [name for name in _OPTIONAL_MAPPING_FIELDS if getattr(value, name) is None]
+        _NULL_FIELDS: [name for name in _OPTIONAL_MAPPING_FIELDS if getattr(value, name) is None],
+        "resume_mode": value.resume_mode.value,
     }
     compatibility = metadata.get(_COMPATIBILITY_METADATA)
     compatibility = compatibility if isinstance(compatibility, dict) else {}

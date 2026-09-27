@@ -28,6 +28,7 @@ from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.continuation import (
     ContinuationDraft,
+    ContinuationResumeMode,
     Correlator,
     CreatedContinuation,
 )
@@ -447,7 +448,9 @@ class NodeContext:
         if level is not None:
             if self.scope is None or self.services.memory is None:
                 raise RuntimeError("Trusted memory scope/factory not bound")
-            return self.services.memory.for_runtime_scope(self.scope, level=level, projection_logger=self.logger())
+            return self.services.memory.for_runtime_scope(
+                self.scope, level=level, projection_logger=self.logger()
+            )
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
@@ -912,6 +915,7 @@ class NodeContext:
         deadline_s: int | None = None,
         poll: dict | None = None,
         attempts: int = 0,
+        resume_mode: ContinuationResumeMode = ContinuationResumeMode.RUNTIME,
     ) -> CreatedContinuation:
         """Atomically create a continuation for this node.
 
@@ -941,6 +945,7 @@ class NodeContext:
             deadline_s: Optional lifetime in seconds from the injected clock.
             poll: Optional provider-neutral polling configuration.
             attempts: Current wait-attempt count.
+            resume_mode: Runtime delivery, or record-only collection by a durable owner.
 
         Returns:
             CreatedContinuation: Tokenless record and one-time raw token.
@@ -948,6 +953,8 @@ class NodeContext:
         Notes:
             A public interaction ID is bound as an initial indexed correlator;
             deprecated App identity remains optional compatibility metadata only.
+            Record-only responses never enqueue this run. The caller must retain
+            the continuation identity and arrange durable response collection.
         """
         deadline = None
         if deadline_s:
@@ -964,11 +971,15 @@ class NodeContext:
                     message=interaction_id,
                 ),
             )
+        prompt = payload.get("prompt") if payload else None
+        if isinstance(prompt, dict):
+            prompt = prompt.get("title") or prompt.get("prompt")
         draft = ContinuationDraft(
             run_id=self.run_id,
             node_id=self.node_id,
             kind=kind,
-            prompt=payload.get("prompt") if payload else None,
+            resume_mode=resume_mode,
+            prompt=prompt,
             resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
             deadline=deadline,

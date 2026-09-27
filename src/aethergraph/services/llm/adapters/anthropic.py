@@ -12,6 +12,7 @@ from typing import Any
 from aethergraph.services.llm._tool_discovery_manifest import (
     render_tool_search_description,
 )
+from aethergraph.services.llm.catalog import resolve_model_catalog_capability_entry
 from aethergraph.services.llm.context_management import (
     ModelContextCheckpoint,
     ModelContextManagement,
@@ -1173,6 +1174,21 @@ class AnthropicMessagesAdapter:
                 "required": "any",
                 "none": "none",
             }[tool_request.choice]
+            tools_entry = resolve_model_catalog_capability_entry(
+                "anthropic", model, "chat", "anthropic_messages", capability="chat_tools"
+            )
+            if (
+                choice_type == "any"
+                and tools_entry is not None
+                and tools_entry.chat_tools is not None
+                and tools_entry.chat_tools.forced_tool_choice == "unsupported"
+            ):
+                raise LLMToolCallCapabilityError(
+                    provider="anthropic",
+                    model=model,
+                    feature="forced_tool_choice",
+                    detail="Select automatic Tool choice for this model.",
+                )
             thinking_type = (payload.get("thinking") or {}).get("type")
             if choice_type == "any" and thinking_type == "enabled":
                 raise LLMToolCallCapabilityError(

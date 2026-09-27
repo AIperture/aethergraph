@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from aethergraph.config.storage_provider import StorageProviderSettings
 from aethergraph.observability import (
     ObservabilityFacade,
+    ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
     open_observability_workspace,
 )
@@ -24,6 +26,7 @@ from aethergraph.storage.contracts import (
     ObservationSeverity,
     ObservationStatus,
     RunRecord,
+    RunResultRecord,
     RunStatus,
     StorageOpenMode,
     StorageOpenRequest,
@@ -64,6 +67,79 @@ def _provider_and_request(root: Path):
         secrets=_Secrets(),
     )
     return provider, request
+
+
+@pytest.mark.asyncio
+async def test_retained_run_output_survives_close_and_enforces_reader_identity(tmp_path):
+    from aethergraph.observability import ObservabilityIdentity
+
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    scope = StorageScope(
+        project_id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session",
+        run_id="control",
+        graph_id="control.graph",
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="control",
+            graph_id="control.graph",
+            kind="graph_fn",
+            status=RunStatus.SUCCEEDED,
+            scope=scope,
+            revision=1,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+    )
+    output = {"result": {"data": {"control": {"acknowledged": True}}}}
+    await bundle.run_results.compare_and_set(
+        RunResultRecord(
+            run_id="control",
+            graph_id="control.graph",
+            scope=scope,
+            status=RunStatus.SUCCEEDED,
+            outputs=output,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+            source="graph_fn",
+        ),
+        0,
+    )
+    await bundle.close()
+    for user, org, allowed in (
+        ("user-1", "org-1", True),
+        ("other-user", "org-1", False),
+        ("user-1", "other-org", False),
+        (None, "org-1", False),
+    ):
+        reader = open_observability_workspace(
+            tmp_path,
+            identity=ObservabilityIdentity(mode="cloud", user_id=user, org_id=org),
+        )
+        try:
+            assert await reader.get_run_output("control") == (output if allowed else None)
+            assert await reader.get_run_output("missing") is None
+            if allowed:
+                run = await reader.get_run("control")
+                assert run["result_available"] is True
+                assert await reader.get_run_output("control") == output
+                detached = await reader.get_run_output("control")
+                assert json.loads(json.dumps(detached)) == output
+                detached["result"]["data"]["control"]["acknowledged"] = False
+                assert await reader.get_run_output("control") == output
+        finally:
+            await reader.close()
+    reopened = provider.open(request)
+    try:
+        retained = await reopened.run_results.get(scope, "control")
+        assert retained.revision == 1 and retained.outputs == output
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -439,3 +515,146 @@ async def test_historical_memory_scope_uses_publishing_run_identity(tmp_path):
         )
     finally:
         await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_kind", [None, "session", "run", "trace"])
+async def test_session_agent_state_reads_exact_owner_without_runtime_or_writes(
+    tmp_path, hidden_kind
+):
+    from aethergraph.observability import ObservabilityIdentity
+    from aethergraph.services.agent_state.canonical_facade import CanonicalAgentStateFacade
+
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    scope = StorageScope(
+        project_id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        session_id="s1",
+        run_id="r1",
+        graph_id="g1",
+        agent_id="main",
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="r1",
+            graph_id="g1",
+            kind="taskgraph",
+            status=RunStatus.SUCCEEDED,
+            scope=scope,
+            revision=1,
+            started_at=NOW,
+            finished_at=NOW,
+        )
+    )
+    shared = CanonicalAgentStateFacade(
+        state_store=bundle.state, scope=replace(scope, agent_id=None)
+    )
+    handle = shared.bind(key="work", model=dict, level="session", backend="memory")
+    await handle.commit({"cursor": 7}, reason="test_retained_session")
+    agent = CanonicalAgentStateFacade(state_store=bundle.state, scope=scope)
+    await agent.bind(key="work", model=dict, level="session").commit(
+        {"cursor": "wrong-agent-scope"}, reason="test_distinct_agent"
+    )
+    if hidden_kind:
+        suppression_scope = StorageScope(
+            project_id="project-1",
+            session_id="s1",
+            run_id="r1" if hidden_kind == "run" else None,
+        )
+        await bundle.observations.compare_and_set_scope_management(
+            ObservationScopeManagementRecord(
+                scope_key=f"{hidden_kind}:hidden",
+                scope=suppression_scope,
+                revision=1,
+                updated_at=NOW,
+                hidden=True,
+                trace_id="r1" if hidden_kind == "trace" else None,
+            ),
+            0,
+        )
+    await bundle.close()
+    reader = open_observability_workspace(tmp_path)
+    try:
+        expected = None if hidden_kind else {"cursor": 7}
+        if hidden_kind:
+            with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="work",
+                    require_accessible=True,
+                )
+        else:
+            assert (
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="work",
+                    require_accessible=True,
+                )
+                == expected
+            )
+            assert (
+                await reader.read_session_state(
+                    session_id="s1",
+                    owner_run_id="r1",
+                    key="missing",
+                    require_accessible=True,
+                )
+                is None
+            )
+        for session_id, run_id in [("s2", "r1"), ("s1", "missing")]:
+            with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+                await reader.read_session_state(
+                    session_id=session_id,
+                    owner_run_id=run_id,
+                    key="work",
+                    require_accessible=True,
+                )
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key="work")
+            == expected
+        )
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key="missing")
+            is None
+        )
+        assert (
+            await reader.read_session_state(session_id="s2", owner_run_id="r1", key="work") is None
+        )
+        assert (
+            await reader.read_session_state(session_id="s1", owner_run_id="missing", key="work")
+            is None
+        )
+        with pytest.raises(ValueError, match="exact"):
+            await reader.read_session_state(session_id="s1", owner_run_id="r1", key=" ")
+    finally:
+        await reader.close()
+    foreign = open_observability_workspace(
+        tmp_path, identity=ObservabilityIdentity(mode="cloud", org_id="org-1", user_id="user-2")
+    )
+    try:
+        with pytest.raises(ObservabilityUnavailableError, match="ownership is unavailable"):
+            await foreign.read_session_state(
+                session_id="s1",
+                owner_run_id="r1",
+                key="work",
+                require_accessible=True,
+            )
+        assert (
+            await foreign.read_session_state(session_id="s1", owner_run_id="r1", key="work") is None
+        )
+    finally:
+        await foreign.close()
+    bundle = provider.open(request)
+    try:
+        retained = CanonicalAgentStateFacade(
+            state_store=bundle.state, scope=replace(scope, agent_id=None)
+        )
+        handle = retained.bind(key="work", model=dict, level="session", backend="memory")
+        assert await handle.load(force=True) == {"cursor": 7}
+        assert handle.revision == 1
+    finally:
+        await bundle.close()

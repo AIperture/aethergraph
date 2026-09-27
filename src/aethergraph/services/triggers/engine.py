@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+import math
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -41,10 +42,79 @@ class TriggerEngine:
     worker_id: str = field(default_factory=lambda: f"trigger-worker-{uuid4().hex[:12]}")
 
     _stop_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+
+    async def start(self, poll_interval_s: float = 5.0) -> None:
+        """Start the single service-owned trigger claim task.
+
+        Creates the stop signal before scheduling work, so immediate shutdown
+        cannot lose its request while the task is starting.
+
+        Examples:
+            Start during runtime startup:
+            ```python
+            await engine.start()
+            ```
+
+            Reuse an already running service:
+            ```python
+            await engine.start(poll_interval_s=1.0)
+            await engine.start(poll_interval_s=1.0)
+            ```
+
+        Args:
+            poll_interval_s: Finite positive time between durable claim scans.
+
+        Returns:
+            None: One owned task exists before returning.
+
+        Notes:
+            Pair with `stop`; startup does not register or load graph definitions.
+        """
+        if not math.isfinite(poll_interval_s) or poll_interval_s <= 0:
+            raise ValueError("Trigger polling interval must be finite and positive")
+        if self._task is not None:
+            if not self._task.done():
+                return
+            self._task.result()
+        self._stop_event = asyncio.Event()
+        self._task = asyncio.create_task(self._run_forever(poll_interval_s))
 
     async def run_forever(self, poll_interval_s: float = 5.0) -> None:
-        """Run the lifespan-owned trigger claim loop until stopped."""
-        self._stop_event = asyncio.Event()
+        """Await the owned trigger service through the existing public loop adapter.
+
+        Starts the same task used by runtime lifespans; cancellation of this
+        legacy owning adapter requests cooperative shutdown and joins that task.
+
+        Examples:
+            Run as a standalone service:
+            ```python
+            await engine.run_forever()
+            ```
+
+            Use a shorter scan interval:
+            ```python
+            await engine.run_forever(poll_interval_s=1.0)
+            ```
+
+        Args:
+            poll_interval_s: Finite positive time between durable claim scans.
+
+        Returns:
+            None: The owned loop has stopped.
+
+        Notes:
+            Embedded and server hosts use `start` and `stop` directly.
+        """
+        await self.start(poll_interval_s)
+        try:
+            await asyncio.shield(self._task)
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
+
+    async def _run_forever(self, poll_interval_s: float) -> None:
+        assert self._stop_event is not None
         started_at = datetime.now(UTC)
         first_scan = True
         if self.logger:
@@ -68,9 +138,38 @@ class TriggerEngine:
             self.logger.info("TriggerEngine stopped worker_id=%s", self.worker_id)
 
     async def stop(self) -> None:
-        """Request cooperative shutdown of the trigger loop."""
+        """Stop and join the single trigger task without abandoning active claims.
+
+        Signals the loop and gives its current claim batch up to thirty seconds
+        to settle. A timeout retains task ownership and leaves shutdown incomplete.
+
+        Examples:
+            Close during runtime shutdown:
+            ```python
+            await engine.stop()
+            ```
+
+            Stop an already stopped service:
+            ```python
+            await engine.stop()
+            await engine.stop()
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            None: The owned task has stopped or was never started.
+
+        Notes:
+            A timeout must prevent the owning host from closing storage beneath
+            a claim still being processed. Calling `stop` again retries the join.
+        """
         if self._stop_event is not None:
             self._stop_event.set()
+        if self._task is not None:
+            await asyncio.wait_for(asyncio.shield(self._task), timeout=30.0)
+            self._task = None
 
     async def _process_due_triggers(
         self,
@@ -201,6 +300,11 @@ class TriggerEngine:
         tags = [f"trigger:{trig.trigger_id}"]
         if fire_id is not None:
             tags.append(f"trigger-fire:{fire_id}")
+        run_config = {}
+        if trig.origin_binding is not None:
+            run_config["origin_binding"] = trig.origin_binding.model_dump(mode="json")
+        if trig.parent_run is not None:
+            run_config["parent_run"] = asdict(trig.parent_run)
         return await self.run_manager.submit_run(
             graph_id=trig.graph_id,
             inputs=inputs,
@@ -208,6 +312,7 @@ class TriggerEngine:
             session_id=trig.session_id,
             identity=identity,
             origin=RunOrigin.schedule,
+            run_config=run_config or None,
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
             agent_id=trig.agent_id,

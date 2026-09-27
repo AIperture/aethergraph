@@ -21,6 +21,8 @@ from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
 
 if TYPE_CHECKING:
+    from aethergraph.services.resume.router import ResumeRouter
+
     from .node_context import NodeContext
 
 
@@ -36,6 +38,7 @@ class NodeServices:
     continuation_store: AsyncContinuationStore
     artifact_store: CanonicalPublicArtifactFacade
     wait_registry: WaitRegistry | None = None
+    resume_router: ResumeRouter | None = None
     clock: SystemClock | None = None
     logger: StdLoggerService | None = (
         None  # StdLoggerService.for_node_ctx() will be used in NodeContext

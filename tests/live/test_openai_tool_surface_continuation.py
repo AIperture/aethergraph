@@ -12,9 +12,8 @@ from aethergraph.services.llm import (
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
-    ToolDiscoveryCapabilities,
-    ToolDiscoveryModeCapability,
     ToolDiscoveryRequest,
+    ToolDiscoveryResult,
     ToolPath,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -37,37 +36,6 @@ _SEARCH_SCHEMA = {
     "required": ["goal"],
     "additionalProperties": False,
 }
-
-
-def _capabilities(model: str) -> ToolDiscoveryCapabilities:
-    return ToolDiscoveryCapabilities(
-        provider="openai",
-        model=model,
-        endpoint_family="responses",
-        supported_modes=(
-            ToolDiscoveryModeCapability(
-                mode="native_client",
-                replay_requirement="previous_response",
-                max_results=5,
-                protocol_version="responses.tool_search",
-                selection_owner="application",
-                tool_representation="search_schema_manifest",
-                inventory_timing="search",
-                path_transport="manifest",
-            ),
-            ToolDiscoveryModeCapability(
-                mode="native_hosted",
-                replay_requirement="none",
-                result_limit_behavior="post_validated",
-                max_results=50,
-                protocol_version="responses.tool_search",
-                selection_owner="provider",
-                tool_representation="full_definitions",
-                inventory_timing="request",
-                path_transport="native_group",
-            ),
-        ),
-    )
 
 
 def _tools() -> tuple[ToolDefinition, ToolDefinition]:
@@ -105,7 +73,7 @@ async def test_openai_continuation_retains_finish_after_deferred_tool_result(mod
 
     model = os.getenv("AG_OPENAI_TOOL_SURFACE_SMOKE_MODEL", "gpt-5.6-luna")
     client = GenericLLMClient("openai", model, api_key=os.environ["OPENAI_API_KEY"])
-    client.bind_tool_discovery_capabilities(_capabilities(model))
+    assert client._tool_discovery_capabilities is not None
     tools = _tools()
     discovery = ToolDiscoveryRequest(
         mode,
@@ -142,6 +110,8 @@ async def test_openai_continuation_retains_finish_after_deferred_tool_result(mod
         if mode == "native_client":
             assert initial.discovery_events
             assert initial.transport_checkpoint is not None
+            discovery_event = initial.discovery_events[0]
+            assert len(discovery_event.provider_reference_ids) == 1
             selected_request = ToolCallRequest(
                 tools=tools,
                 choice="required",
@@ -149,6 +119,12 @@ async def test_openai_continuation_retains_finish_after_deferred_tool_result(mod
                 turn_id=f"live-{mode}",
                 active_tool_names=("deferred_receipt_probe",),
                 transport_checkpoint=initial.transport_checkpoint,
+                discovery_result=ToolDiscoveryResult(
+                    discovery_event_id=discovery_event.event_id,
+                    provider_reference_id=discovery_event.provider_reference_ids[0],
+                    status="completed",
+                    tool_names=("deferred_receipt_probe",),
+                ),
             )
             selected, _usage = await client.chat(
                 messages,

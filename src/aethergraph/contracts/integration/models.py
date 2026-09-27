@@ -877,8 +877,23 @@ class ToolErrorPayload(IntegrationContract):
 
 
 class ToolActivityPayload(LegacyToolActivityPayload):
-    """Canonical Tool activity carrying an optional structured failure."""
+    """Canonical Tool activity carrying an optional structured failure.
 
+    Dispatched, queued and submission_unknown settle the caller's admission
+    receipt. They do not assert a worker's final computational outcome.
+    """
+
+    status: Literal[
+        "started",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "canceled",
+        "dispatched",
+        "queued",
+        "submission_unknown",
+    ]
     error: ToolErrorPayload | None = None
 
     @model_validator(mode="after")

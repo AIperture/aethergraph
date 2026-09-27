@@ -12,6 +12,7 @@ import pytest
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import (
+    RunParent,
     RunRecord,
     RunStatus,
     SessionKind,
@@ -132,6 +133,7 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
         session_id="session-1",
         app_id="deprecated-app",
         meta={"phase": "start"},
+        parent=RunParent(run_id="parent-run", session_id="parent-session"),
     )
     await store.create(record)
 
@@ -150,6 +152,19 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
     assert projected is not None
     assert projected.app_id == "deprecated-app"
     assert projected.meta == {"phase": "start"}
+    assert projected.parent == record.parent
+    with pytest.raises(ValueError, match="public metadata reserves"):
+        await store.update_status(
+            "run-1",
+            RunStatus.running,
+            meta_update={"parent": {"run_id": "foreign", "session_id": "foreign"}},
+        )
+    with pytest.raises(ValueError, match="Unsupported run field"):
+        await store.update_status(
+            "run-1",
+            RunStatus.running,
+            field_updates={"parent": RunParent("foreign-run", "foreign-session")},
+        )
     with pytest.raises(ValueError, match="public metadata reserves"):
         await store.update_status(
             "run-1",
@@ -188,6 +203,7 @@ async def test_run_projection_preserves_scope_metadata_queries_and_occurrences(
     updated = await store.get("run-1")
     assert updated is not None
     assert updated.status == RunStatus.waiting
+    assert updated.parent == record.parent
     assert updated.meta["phase"] == "waiting"
     assert updated.artifact_count == 1
     assert updated.recent_artifact_ids == ["content-1"]
@@ -479,3 +495,107 @@ def test_control_projection_public_docstrings_follow_required_style() -> None:
 
     app_field = next(item for item in fields(RunRecord) if item.name == "app_id")
     assert app_field.metadata["deprecated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("through_manager", [False, True])
+async def test_cancellation_status_cas_losing_to_completion_preserves_terminal_result(
+    tmp_path, monkeypatch, through_manager
+):
+    database = _database(tmp_path)
+    store, _, _, repository, _, _ = _stores(database, _Clock())
+    await store.create(
+        RunRecord(
+            run_id="cancel-race",
+            graph_id="graph",
+            kind="graphfn",
+            status=RunStatus.running,
+            started_at=NOW,
+        )
+    )
+    original = repository.compare_and_set
+    raced = []
+
+    async def race_completion(record, expected_revision):
+        if not raced:
+            raced.append(record.status.value)
+            await store.update_status(
+                "cancel-race",
+                RunStatus.succeeded,
+                finished_at=NOW,
+                meta_update={"completion": "retained"},
+            )
+        return await original(record, expected_revision)
+
+    monkeypatch.setattr(repository, "compare_and_set", race_completion)
+    try:
+        if through_manager:
+            from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
+
+            controls = RunCancellationRegistry()
+            manager = RunManager(
+                run_store=store, registry=UnifiedRegistry(), cancellation_registry=controls
+            )
+            result = await manager.cancel_run("cancel-race")
+            assert result.status == RunStatus.succeeded
+            handle = await controls.get("cancel-race")
+            assert not handle.is_cancel_requested()
+        else:
+            await store.update_status("cancel-race", RunStatus.cancellation_requested)
+        current = await store.get("cancel-race")
+        assert current.status == RunStatus.succeeded and current.finished_at == NOW
+        assert current.meta["completion"] == "retained"
+        assert raced == ["cancellation_requested"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_status_retry_merges_concurrent_metadata_and_bounds_conflicts(tmp_path, monkeypatch):
+    from aethergraph.storage.contracts import StorageConflictError
+
+    database = _database(tmp_path)
+    store, _, _, repository, _, _ = _stores(database, _Clock())
+    await store.create(
+        RunRecord(
+            run_id="metadata-race",
+            graph_id="graph",
+            kind="graphfn",
+            status=RunStatus.running,
+            started_at=NOW,
+        )
+    )
+    original = repository.compare_and_set
+    raced = []
+
+    async def race_metadata(record, expected_revision):
+        if not raced:
+            raced.append(True)
+            await store.update_status(
+                "metadata-race", RunStatus.running, meta_update={"other": "retained"}
+            )
+        return await original(record, expected_revision)
+
+    monkeypatch.setattr(repository, "compare_and_set", race_metadata)
+    try:
+        await store.update_status(
+            "metadata-race", RunStatus.running, meta_update={"mine": "retained"}
+        )
+        assert (await store.get("metadata-race")).meta == {"other": "retained", "mine": "retained"}
+        attempts = []
+
+        async def always_conflict(record, expected_revision):
+            attempts.append(expected_revision)
+            raise StorageConflictError("Persistent conflict")
+
+        monkeypatch.setattr(repository, "compare_and_set", always_conflict)
+        with pytest.raises(StorageConflictError, match="Persistent conflict"):
+            await store.update_status("metadata-race", RunStatus.succeeded, finished_at=NOW)
+        assert len(attempts) == 8
+        monkeypatch.setattr(repository, "compare_and_set", original)
+        await store.update_status("metadata-race", RunStatus.succeeded, finished_at=NOW)
+        with pytest.raises(StorageIntegrityError, match="terminal run outcome"):
+            await store.update_status("metadata-race", RunStatus.failed, finished_at=NOW)
+        assert (await store.get("metadata-race")).status == RunStatus.succeeded
+    finally:
+        await database.close()
