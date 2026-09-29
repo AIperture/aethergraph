@@ -16,6 +16,7 @@ from .canonical_service import (
 )
 from .inspection import (
     ObservabilityIdentity,
+    ObservabilityMigrationRequiredError,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
@@ -56,6 +57,7 @@ __all__ = [
     "OperationObserver",
     "OperationSpan",
     "ObservabilityIdentity",
+    "ObservabilityMigrationRequiredError",
     "ObservabilityFacade",
     "ObservabilityNotFoundError",
     "ObservabilityUnavailableError",

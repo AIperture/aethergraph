@@ -17,6 +17,10 @@ class ObservabilityWorkspaceError(RuntimeError):
     """Signal that a manifested historical workspace cannot be opened."""
 
 
+class ObservabilityMigrationRequiredError(ObservabilityWorkspaceError):
+    """Signal that intact historical storage needs a writable migration before inspection."""
+
+
 @dataclass(frozen=True)
 class ObservabilityIdentity:
     """Authenticated identity applied to one canonical inspection reader."""
@@ -28,6 +32,7 @@ class ObservabilityIdentity:
 
 __all__ = [
     "ObservabilityIdentity",
+    "ObservabilityMigrationRequiredError",
     "ObservabilityNotFoundError",
     "ObservabilityUnavailableError",
     "ObservabilityWorkspaceError",
