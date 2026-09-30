@@ -241,7 +241,8 @@ class LocalSQLiteDatabase:
                 raise StorageFormatError(
                     f"Read-only local database is missing schema component {name!r}"
                 )
-            self._connection.execute("BEGIN IMMEDIATE")
+            nested = self._connection.in_transaction
+            self._connection.execute("SAVEPOINT component_install" if nested else "BEGIN IMMEDIATE")
             try:
                 for statement in statements:
                     self._connection.execute(statement)
@@ -250,9 +251,16 @@ class LocalSQLiteDatabase:
                     (name, version),
                 )
             except BaseException:
-                self._connection.rollback()
+                if nested:
+                    self._connection.execute("ROLLBACK TO component_install")
+                    self._connection.execute("RELEASE component_install")
+                else:
+                    self._connection.rollback()
                 raise
-            self._connection.commit()
+            if nested:
+                self._connection.execute("RELEASE component_install")
+            else:
+                self._connection.commit()
         except sqlite3.Error as exc:
             raise _classify_sqlite_error(exc, self.role) from exc
 
@@ -326,7 +334,10 @@ class LocalSQLiteDatabase:
                 f"from {from_version} to {to_version}"
             )
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            nested = self._connection.in_transaction
+            self._connection.execute(
+                "SAVEPOINT component_migration" if nested else "BEGIN IMMEDIATE"
+            )
             try:
                 for statement in statements:
                     self._connection.execute(statement)
@@ -335,9 +346,16 @@ class LocalSQLiteDatabase:
                     (to_version, name, from_version),
                 )
             except BaseException:
-                self._connection.rollback()
+                if nested:
+                    self._connection.execute("ROLLBACK TO component_migration")
+                    self._connection.execute("RELEASE component_migration")
+                else:
+                    self._connection.rollback()
                 raise
-            self._connection.commit()
+            if nested:
+                self._connection.execute("RELEASE component_migration")
+            else:
+                self._connection.commit()
         except sqlite3.Error as exc:
             raise _classify_sqlite_error(exc, self.role) from exc
         return True
