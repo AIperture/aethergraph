@@ -73,6 +73,14 @@ class StorageFormatError(StorageError):
     """A workspace manifest or provider schema version is unsupported."""
 
 
+class StorageMigrationRequiredError(StorageFormatError):
+    """A read-only handle found an older, supported schema that only a writable open migrates.
+
+    The stored data is intact; readers can tell this apart from unsupported or
+    damaged storage and report that the workspace needs a current writer.
+    """
+
+
 class StorageHealthError(StorageError):
     """A provider failed its required readiness or health check."""
 

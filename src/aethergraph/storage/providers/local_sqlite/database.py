@@ -15,6 +15,7 @@ from ...contracts import (
     StorageHealth,
     StorageHealthError,
     StorageIntegrityError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageReadOnlyError,
     StorageTimeoutError,
@@ -300,7 +301,8 @@ class LocalSQLiteDatabase:
             bool: `False` when absent; otherwise `True` after target validation or migration.
 
         Notes:
-            Read-only handles report required migrations as `StorageFormatError`.
+            Read-only handles report required migrations as
+            `StorageMigrationRequiredError` (a `StorageFormatError`).
         """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("component name must be non-empty")
@@ -319,7 +321,7 @@ class LocalSQLiteDatabase:
                 f"Local schema component {name!r} cannot migrate from version {current}"
             )
         if self.mode is StorageOpenMode.READ_ONLY:
-            raise StorageFormatError(
+            raise StorageMigrationRequiredError(
                 f"Read-only local schema component {name!r} requires migration "
                 f"from {from_version} to {to_version}"
             )

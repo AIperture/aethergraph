@@ -11,6 +11,7 @@ import pytest
 from aethergraph.config.storage_provider import StorageProviderSettings
 from aethergraph.observability import (
     ObservabilityFacade,
+    ObservabilityMigrationRequiredError,
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
     open_observability_workspace,
@@ -28,6 +29,8 @@ from aethergraph.storage.contracts import (
     RunRecord,
     RunResultRecord,
     RunStatus,
+    StorageFormatError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageScope,
@@ -67,6 +70,37 @@ def _provider_and_request(root: Path):
         secrets=_Secrets(),
     )
     return provider, request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("migration_required", [True, False])
+async def test_workspace_open_exposes_migration_without_private_storage_types(
+    tmp_path, monkeypatch, migration_required
+):
+    from aethergraph.observability.workspace import StorageComposition
+
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    await bundle.close()
+    manifest_before = (tmp_path / "workspace.json").read_bytes()
+    failure = (
+        StorageMigrationRequiredError("control requires migration from 1 to 2")
+        if migration_required
+        else StorageFormatError("unsupported control schema")
+    )
+    modes = []
+
+    def reject_open(self, request):
+        modes.append(request.mode)
+        raise failure
+
+    monkeypatch.setattr(StorageComposition, "prepare", reject_open)
+    with pytest.raises(ObservabilityWorkspaceError) as raised:
+        open_observability_workspace(tmp_path)
+    assert isinstance(raised.value, ObservabilityMigrationRequiredError) is migration_required
+    assert raised.value.__cause__ is failure
+    assert modes == [StorageOpenMode.READ_ONLY]
+    assert (tmp_path / "workspace.json").read_bytes() == manifest_before
 
 
 @pytest.mark.asyncio

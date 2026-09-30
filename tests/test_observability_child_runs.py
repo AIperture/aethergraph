@@ -12,8 +12,8 @@ from aethergraph.storage.contracts import (
     PageRequest,
     RunQuery,
     StorageConfigurationError,
-    StorageFormatError,
     StorageIntegrityError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageScope,
 )
@@ -157,7 +157,7 @@ async def test_v1_parent_metadata_migrates_once_and_read_only_requires_upgrade(t
     await database.close()
     readonly = _database(tmp_path, StorageOpenMode.READ_ONLY)
     try:
-        with pytest.raises(StorageFormatError, match="requires migration"):
+        with pytest.raises(StorageMigrationRequiredError, match="requires migration"):
             LocalRunRepository(database=readonly)
     finally:
         await readonly.close()

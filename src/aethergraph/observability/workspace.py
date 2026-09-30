@@ -19,6 +19,7 @@ from aethergraph.observability.canonical_service import (
 )
 from aethergraph.observability.inspection import (
     ObservabilityIdentity,
+    ObservabilityMigrationRequiredError,
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
 )
@@ -43,6 +44,7 @@ from aethergraph.storage.contracts import (
     StorageBundle,
     StorageCapability,
     StorageError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageScope,
@@ -1035,6 +1037,8 @@ def open_observability_workspace(
     Notes:
         Unmanifested, malformed, unsupported, or non-local workspaces fail directly.
         No legacy layout probe, migration, alternate provider, or writable open occurs.
+        Intact older schemas raise ``ObservabilityMigrationRequiredError``; other
+        open failures remain ``ObservabilityWorkspaceError``.
     """
     root = Path(workspace_root).expanduser().resolve()
     try:
@@ -1072,6 +1076,10 @@ def open_observability_workspace(
                 secrets=_UnavailableHistoricalSecrets(),
             )
         )
+    except StorageMigrationRequiredError as exc:
+        raise ObservabilityMigrationRequiredError(
+            "AetherGraph historical workspace requires a writable migration before inspection"
+        ) from exc
     except (OSError, StorageError, ValueError) as exc:
         raise ObservabilityWorkspaceError(
             "AetherGraph manifested observability workspace could not be opened"
