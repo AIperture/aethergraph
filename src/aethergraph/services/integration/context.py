@@ -25,3 +25,7 @@ class VerifiedIntegrationContext:
     external_tenant_id: str
     attachments: tuple[VerifiedAttachment, ...] = ()
     request_identity: Any | None = None
+    # Host-only authority, never decoded from provider payload/transport metadata.
+    # The exact graph may append control intent while a session root is active;
+    # it must not execute a second writer against mutable Agent state.
+    control_graph_id: str | None = None

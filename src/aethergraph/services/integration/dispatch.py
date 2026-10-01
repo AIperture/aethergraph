@@ -198,6 +198,8 @@ class AGRootTurnDispatcher:
                 "Only 'graphfn' is supported."
             )
         graph_id = backing["name"]
+        if verified.control_graph_id is not None and verified.control_graph_id != graph_id:
+            raise ValueError("Trusted control ingress graph does not match the resolved route")
         origin_binding = OriginBinding(
             integration_id=envelope.integration_id,
             route_id=route.route_id,
@@ -378,7 +380,11 @@ class AGRootTurnDispatcher:
             session_id=binding.ag_session_id,
             identity=identity,
             origin=RunOrigin.chat,
-            visibility=RunVisibility(agent_meta.get("run_visibility", RunVisibility.inline.value)),
+            visibility=(
+                RunVisibility.hidden
+                if verified.control_graph_id is not None
+                else RunVisibility(agent_meta.get("run_visibility", RunVisibility.inline.value))
+            ),
             importance=RunImportance(
                 agent_meta.get("run_importance", RunImportance.ephemeral.value)
             ),

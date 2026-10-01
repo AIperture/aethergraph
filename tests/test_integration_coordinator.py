@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 import logging
 from types import SimpleNamespace
@@ -83,7 +84,10 @@ def _route(*, enabled: bool = True, attachments: bool = True) -> IntegrationRout
 
 
 @pytest.mark.asyncio
-async def test_root_dispatch_adopts_resources_before_external_admission(monkeypatch) -> None:
+@pytest.mark.parametrize("control", [False, True])
+async def test_root_dispatch_adopts_resources_before_external_admission(
+    monkeypatch, control
+) -> None:
     events: list[tuple[str, object]] = []
     submitted_inputs: dict[str, object] = {}
 
@@ -106,6 +110,7 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
 
     class _RunManager:
         async def submit_run(self, **kwargs):
+            assert kwargs["visibility"].value == ("hidden" if control else "inline")
             submitted_inputs.update(kwargs["inputs"])
             record = SimpleNamespace(
                 run_id="run-root-1",
@@ -137,7 +142,7 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
         events.append(("external_admission", run_id))
 
     run_id = await dispatcher.start(
-        verified=_verified(),
+        verified=replace(_verified(), control_graph_id="graph.support") if control else _verified(),
         route=_route(),
         binding=_binding(),
         session_scope=StorageScope(
@@ -183,6 +188,42 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
         "content_type": "application/octet-stream",
         "size_bytes": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_control_ingress_authority_is_exact_and_not_envelope_metadata(monkeypatch):
+    submitted = []
+
+    class Registry:
+        def get_meta(self, **kwargs):
+            return {"backing": {"type": "graphfn", "name": "graph.support"}}
+
+    class Manager:
+        async def submit_run(self, **kwargs):
+            submitted.append(kwargs)
+            return SimpleNamespace(run_id="run-1")
+
+    monkeypatch.setattr(dispatch_module, "scoped_registry", lambda _: Registry())
+    dispatcher = AGRootTurnDispatcher(
+        SimpleNamespace(run_manager=Manager()),
+        turn_monitor=SimpleNamespace(observe=lambda **kwargs: None),
+    )
+    args = dict(
+        route=_route(),
+        binding=_binding(),
+        session_scope=StorageScope(session_id="session-1"),
+        envelope=_envelope().model_copy(
+            update={"transport_metadata": {"control_graph_id": "graph.support"}}
+        ),
+        resources=(),
+    )
+    with pytest.raises(ValueError, match="control ingress graph"):
+        await dispatcher.start(
+            verified=replace(_verified(), control_graph_id="wrong.graph"), **args
+        )
+    assert submitted == []
+    await dispatcher.start(verified=_verified(), **args)
+    assert submitted[0]["visibility"].value == "inline"
 
 
 def _manifest(
