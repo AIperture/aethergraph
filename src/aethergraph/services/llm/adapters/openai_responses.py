@@ -1319,13 +1319,35 @@ class OpenAIResponsesAdapter:
             # Existing parsing logic for message-only flows
             output = data.get("output")
             if tool_request is not None:
-                response = _openai_tool_call_response(
-                    data,
-                    tool_request=tool_request,
-                    model=model,
-                    prompt_message_count=len(input_messages),
-                    prompt_prefix_digest=prompt_prefix_digest,
-                )
+                try:
+                    response = _openai_tool_call_response(
+                        data,
+                        tool_request=tool_request,
+                        model=model,
+                        prompt_message_count=len(input_messages),
+                        prompt_prefix_digest=prompt_prefix_digest,
+                    )
+                except LLMToolCallResponseError as exc:
+                    # Retain provider facts even when normalization cannot produce
+                    # response items. Never infer truncation from malformed JSON.
+                    exc.response_usage = dict(usage or {})
+                    exc.response_diagnostics = {
+                        "response_id": str(data.get("id") or "")[:256],
+                        "status": str(data.get("status") or "unknown")[:64],
+                        "incomplete_reason": str(
+                            (data.get("incomplete_details") or {}).get("reason") or ""
+                        )[:256],
+                        "tool_arguments": [
+                            {
+                                "call_id": str(item.get("call_id") or "")[:256],
+                                "name": str(item.get("name") or "")[:128],
+                                "argument_chars": len(str(item.get("arguments") or "")),
+                            }
+                            for item in (data.get("output") or [])[:16]
+                            if isinstance(item, dict) and item.get("type") == "function_call"
+                        ],
+                    }
+                    raise
                 return ProviderCallResult(
                     (
                         replace(

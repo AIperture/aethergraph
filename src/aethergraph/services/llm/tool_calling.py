@@ -153,6 +153,8 @@ class LLMToolCallResponseError(LLMToolCallError):
             raise ValueError("Tool-call response error message must not be empty")
         super().__init__(normalized_message)
         self.code = normalized_code
+        self.response_diagnostics: dict[str, Any] = {}
+        self.response_usage: dict[str, Any] = {}
 
 
 @dataclass(frozen=True)
