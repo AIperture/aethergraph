@@ -58,6 +58,7 @@ from aethergraph.storage.contracts import (
     StorageStartupDiagnostic,
     StorageStartupError,
 )
+from aethergraph.storage.providers.local_sqlite.history_migration import migrate_local_history
 
 __all__ = [
     # general service management
@@ -109,4 +110,5 @@ __all__ = [
     "StorageStartupDiagnostic",
     "StorageStartupError",
     "open_embedded_runtime",
+    "migrate_local_history",
 ]

@@ -7,9 +7,9 @@ import sqlite3
 
 import pytest
 
+from aethergraph.runtime import migrate_local_history
 from aethergraph.storage.contracts import StorageError, StorageFormatError, StorageOpenMode
 from aethergraph.storage.providers.local_sqlite import LocalDatabaseRole, LocalSQLiteDatabase
-from aethergraph.storage.providers.local_sqlite.history_migration import migrate_local_history
 
 
 def seed(root, *, broken=False):
