@@ -578,8 +578,12 @@ class LocalSQLiteDatabase:
         async with self._lock:
             if self._closed:
                 return
-            self._closed = True
-            await asyncio.to_thread(self._connection.close)
+
+            def close_connection(connection: sqlite3.Connection) -> None:
+                connection.close()
+                self._closed = True
+
+            await self._run_thread(close_connection)
 
     def _close_during_open_failure(self) -> None:
         if self._closed:
@@ -592,9 +596,29 @@ class LocalSQLiteDatabase:
             if self._closed:
                 raise StorageHealthError(f"Local {self.role.value} database is closed")
             try:
-                return await asyncio.to_thread(operation, self._connection)
+                return await self._run_thread(operation)
             except sqlite3.Error as exc:
                 raise _classify_sqlite_error(exc, self.role) from exc
+
+    async def _run_thread(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        # The caller holds _lock. Cancellation cannot stop a native SQLite call;
+        # retain that lock until the thread settles before propagating cancellation.
+        task = asyncio.create_task(asyncio.to_thread(operation, self._connection))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled() and task.exception() is not None:
+                cancellation.add_note(
+                    f"SQLite operation settled with {type(task.exception()).__name__}"
+                )
+            raise cancellation
 
 
 def _connect(path: Path, mode: StorageOpenMode, busy_timeout_ms: int) -> sqlite3.Connection:
