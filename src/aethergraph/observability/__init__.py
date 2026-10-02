@@ -16,10 +16,12 @@ from .canonical_service import (
 )
 from .inspection import (
     ObservabilityIdentity,
+    ObservabilityIndexRequiredError,
     ObservabilityMigrationRequiredError,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
+    observability_storage_errors,
 )
 from .logger import LoggingConfig, StdLoggerService
 from .metering import CanonicalMeteringService
@@ -57,6 +59,7 @@ __all__ = [
     "OperationObserver",
     "OperationSpan",
     "ObservabilityIdentity",
+    "ObservabilityIndexRequiredError",
     "ObservabilityMigrationRequiredError",
     "ObservabilityFacade",
     "ObservabilityNotFoundError",
@@ -76,5 +79,6 @@ __all__ = [
     "resolve_operation_observer",
     "summarize_payload",
     "open_observability_workspace",
+    "observability_storage_errors",
     "CanonicalMeteringService",
 ]
