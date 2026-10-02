@@ -1478,6 +1478,28 @@ class ObservationRepository(Protocol):
         """
         ...
 
+    async def scope_management_revision(self, scope: StorageScope) -> str:
+        """Return an opaque visibility revision for cache invalidation.
+
+        Intro:
+            Provides a generic visibility fence for disposable derived caches.
+
+        Examples:
+            ```python
+            token = await observations.scope_management_revision(scope)
+            ```
+            ```python
+            changed = token != await observations.scope_management_revision(scope)
+            ```
+        Args:
+            scope: Canonical owner scope constraining management records.
+        Returns:
+            str: Opaque token changing on each management mutation within scope.
+        Notes:
+            No record bodies or identifiers are returned. This grants no access.
+        """
+        ...
+
     async def get_scope_management(
         self,
         scope: StorageScope,

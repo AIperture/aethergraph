@@ -291,6 +291,31 @@ class _CanonicalObservabilityFacade:
         """
         return await (await self._inspection()).list_agent_events(**filters)
 
+    async def scope_management_revision(self) -> str:
+        """Read an owner-bound opaque retention/visibility invalidation token.
+
+        Intro:
+            Delegates scope management revision aggregation to canonical storage.
+
+        Examples:
+            ```python
+            token = await facade.scope_management_revision()
+            ```
+            ```python
+            unchanged = token == await facade.scope_management_revision()
+            ```
+        Args:
+            None.
+        Returns:
+            str: Canonical management aggregate token without policy hydration.
+        Notes:
+            This invalidates derived caches; it does not establish authorization.
+        """
+        scope = self._query_scope()
+        if scope is None:
+            raise ObservabilityUnavailableError("Observation owner scope is unavailable")
+        return await (await self._bundle()).observations.scope_management_revision(scope)
+
     async def list_suppressed_scopes(
         self,
         *,

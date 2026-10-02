@@ -41,6 +41,46 @@ NOW = datetime(2026, 8, 16, 20, tzinfo=UTC)
 OWNER = StorageScope(project_id="project-1")
 
 
+@pytest.mark.asyncio
+async def test_visibility_revision_is_scoped_and_changes_without_policy_hydration(
+    tmp_path, monkeypatch
+):
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    policy = ObservationScopeManagementRecord(
+        scope_key="trace:hidden",
+        scope=OWNER,
+        revision=1,
+        updated_at=NOW,
+        trace_id="trace-1",
+        hidden=True,
+    )
+    before = await bundle.observations.scope_management_revision(OWNER)
+    await bundle.observations.compare_and_set_scope_management(policy, 0)
+    first = await bundle.observations.scope_management_revision(OWNER)
+    assert before != first
+    await bundle.observations.compare_and_set_scope_management(
+        replace(policy, revision=2, hidden=False), 1
+    )
+    assert first != await bundle.observations.scope_management_revision(OWNER)
+    assert (
+        await bundle.observations.scope_management_revision(StorageScope(project_id="foreign"))
+        == before
+    )
+    await bundle.close()
+    import aethergraph.storage.providers.local_sqlite.observation_repository as repository
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Revision query must not hydrate policy rows")
+
+    monkeypatch.setattr(repository, "_management", forbidden)
+    facade = open_observability_workspace(tmp_path)
+    try:
+        assert await facade.scope_management_revision() == "1:2"
+    finally:
+        await facade.close()
+
+
 class _Clock:
     def now(self) -> datetime:
         return NOW

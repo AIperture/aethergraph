@@ -1144,6 +1144,36 @@ class LocalObservationRepository:
 
         return await self._database.read_transaction(read)
 
+    async def scope_management_revision(self, scope: StorageScope) -> str:
+        """Aggregate scoped monotonic policy revisions without row hydration.
+
+        Intro:
+            Uses canonical management revisions without a provider schema change.
+
+        Examples:
+            ```python
+            token = await repository.scope_management_revision(scope)
+            ```
+            ```python
+            assert token == await repository.scope_management_revision(scope)
+            ```
+        Args:
+            scope: Canonical scope constraining the management aggregate.
+        Returns:
+            str: Count and revision-sum token for visibility cache invalidation.
+        Notes:
+            Canonical management CAS increments revisions and retains policy rows.
+            SQL returns one aggregate; management bodies are never deserialized.
+        """
+        clauses, values = _management_scope_filters(scope, alias="m")
+        where = " AND ".join(clauses) if clauses else "1 = 1"
+        rows = await self._database.fetch_all(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(m.revision), 0) AS revision "
+            "FROM local_observation_scope_management m WHERE " + where,
+            tuple(values),
+        )
+        return f"{rows[0]['count']}:{rows[0]['revision']}"
+
     async def get_scope_management(
         self, scope: StorageScope, scope_key: str
     ) -> ObservationScopeManagementRecord | None:
