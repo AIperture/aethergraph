@@ -644,6 +644,7 @@ class LLMCallQuery:
     prompt_manifest_ids: tuple[str, ...] = ()
     statuses: tuple[ObservationStatus, ...] = ()
     llm_call_ids: tuple[str, ...] = ()
+    call_names: tuple[str, ...] = ()
     include_payload_metadata: bool = True
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
@@ -659,6 +660,7 @@ class LLMCallQuery:
             ("prompt_manifest_ids", self.prompt_manifest_ids),
             ("statuses", self.statuses),
             ("llm_call_ids", self.llm_call_ids),
+            ("call_names", self.call_names),
         ):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -669,6 +671,7 @@ class LLMCallQuery:
             ("models", self.models),
             ("call_types", self.call_types),
             ("prompt_manifest_ids", self.prompt_manifest_ids),
+            ("call_names", self.call_names),
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
@@ -1253,6 +1256,41 @@ class ObservationRepository(Protocol):
 
         Notes:
             Providers never hydrate prompt bodies during query/list operations.
+        """
+        ...
+
+    async def read_llm_content_chunk(
+        self,
+        scope: StorageScope,
+        llm_call_id: str,
+        *,
+        section: str,
+        offset: int = 0,
+        limit: int = 4096,
+        entry_index: int | None = None,
+    ) -> Mapping[str, FrozenJson] | None:
+        """Read one selected captured section as bounded canonical JSON text.
+
+        Examples:
+            ```python
+            chunk = await observations.read_llm_content_chunk(scope, "call-1", section="response")
+            ```
+            ```python
+            chunk = await observations.read_llm_content_chunk(scope, "call-1", section="request", entry_index=3)
+            ```
+        Args:
+            scope: Populated exact owner scope.
+            llm_call_id: Exact stable call identity.
+            section: Request, response, trace, tool_surface or attempt.
+            offset: Zero-based Unicode character offset in serialized JSON text.
+            limit: Maximum source characters from one through 16384.
+            entry_index: Request-message index or one-based attempt number.
+        Returns:
+            Mapping | None: Identity, capture availability, source revision and bounded
+                text; absent owners return None. Uncaptured sections remain explicit.
+        Notes:
+            Only the selected section is hydrated. JSON text can span several chunks;
+            callers concatenate it before parsing. Existing full detail is unchanged.
         """
         ...
 

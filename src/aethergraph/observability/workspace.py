@@ -560,6 +560,7 @@ class _CanonicalObservabilityFacade:
         providers: tuple[str, ...] = (),
         models: tuple[str, ...] = (),
         call_types: tuple[str, ...] = (),
+        call_names: tuple[str, ...] = (),
         statuses: tuple[str, ...] = (),
         since: datetime | None = None,
         until: datetime | None = None,
@@ -586,6 +587,7 @@ class _CanonicalObservabilityFacade:
             providers: Exact provider alternatives.
             models: Exact model alternatives.
             call_types: Exact logical call-type alternatives.
+            call_names: Exact recorded call-name alternatives.
             statuses: Exact canonical observation statuses (ok/error/pending/unknown).
             since: Inclusive UTC occurrence lower bound.
             until: Inclusive UTC occurrence upper bound.
@@ -615,6 +617,7 @@ class _CanonicalObservabilityFacade:
                 providers=providers,
                 models=models,
                 call_types=call_types,
+                call_names=call_names,
                 statuses=tuple(ObservationStatus(value) for value in statuses),
                 occurred_at_or_after=since,
                 occurred_at_or_before=until,
@@ -705,6 +708,56 @@ class _CanonicalObservabilityFacade:
         if any(record.trace_id in hidden["trace_id"] for record in page.items):
             raise ObservabilityUnavailableError("Selected observation is suppressed")
         return page
+
+    async def read_llm_content_chunk(
+        self,
+        *,
+        run_id: str,
+        llm_call_id: str,
+        section: str,
+        offset: int = 0,
+        limit: int = 4096,
+        entry_index: int | None = None,
+    ) -> Mapping[str, Any]:
+        """Read one exact authorized call section without full-detail hydration.
+
+        Intro:
+            Compact canonical lookup validates owner and visibility before the
+            repository selects a bounded substring of the requested section.
+        Examples:
+            ```python
+            chunk = await facade.read_llm_content_chunk(run_id="run-1", llm_call_id="call-1", section="response")
+            ```
+            ```python
+            chunk = await facade.read_llm_content_chunk(run_id="run-1", llm_call_id="call-1", section="request", entry_index=2)
+            ```
+        Args:
+            run_id: Exact accessible physical owner.
+            llm_call_id: Exact call identity belonging to this run.
+            section: Request, response, trace, tool_surface or attempt.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            entry_index: Request-message index or one-based attempt number.
+        Returns:
+            Mapping: Bounded canonical JSON text and explicit capture availability.
+        Notes:
+            Concatenate chunks before parsing. No unrelated section is hydrated.
+        """
+        page = await self.page_llm_call_records(run_id=run_id, llm_call_ids=(llm_call_id,), limit=1)
+        if not page.items:
+            raise ObservabilityUnavailableError("Selected call is unavailable")
+        scope = self._query_scope(run_id=run_id)
+        result = await (await self._bundle()).observations.read_llm_content_chunk(
+            scope,
+            llm_call_id,
+            section=section,
+            offset=offset,
+            limit=limit,
+            entry_index=entry_index,
+        )
+        if result is None:
+            raise ObservabilityUnavailableError("Selected call content is unavailable")
+        return result
 
     async def supporting_stores(
         self, *, run_id: str
