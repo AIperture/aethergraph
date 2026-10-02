@@ -66,6 +66,50 @@ async def test_local_event_store_passes_shared_provider_conformance(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_event_payload_bound_precedes_hydration_and_tail_resume_survives_append(
+    tmp_path, monkeypatch
+):
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    store = LocalEventStore(database=database, stream="runtime")
+    scope = StorageScope(project_id="project-1")
+    await store.append_many(
+        tuple(_event(f"large-{i}", scope, payload={"body": "λ" * 10000}) for i in range(20))
+    )
+    original = LocalSQLiteDatabase.fetch_all
+    hydrated = []
+
+    async def measured(self, sql, parameters=()):
+        rows = await original(self, sql, parameters)
+        if self is database and sql.startswith("SELECT * FROM local_events"):
+            hydrated.append(sum(len(str(row["payload_json"]).encode()) for row in rows))
+        return rows
+
+    monkeypatch.setattr(LocalSQLiteDatabase, "fetch_all", measured)
+    query = EventQuery(scope=scope, order=SortDirection.ASCENDING, payload_byte_budget=100000)
+    collected = []
+    while True:
+        page = await store.query(query)
+        collected.extend(record.event_id for record in page.items)
+        assert hydrated[-1] <= 100000
+        assert page.resume_cursor
+        if page.next_cursor is None:
+            break
+        query = replace(query, page=PageRequest(cursor=page.next_cursor))
+    assert len(collected) == len(set(collected)) == 20
+    tail = page.resume_cursor
+    empty = await store.query(replace(query, page=PageRequest(cursor=tail)))
+    assert empty.items == () and empty.resume_cursor == tail
+    await store.append(_event("appended", scope))
+    resumed = await store.query(replace(query, page=PageRequest(cursor=tail)))
+    assert [row.event_id for row in resumed.items] == ["appended"]
+    oversized = await store.query(
+        EventQuery(scope=scope, payload_byte_budget=1024, order=SortDirection.ASCENDING)
+    )
+    assert len(oversized.items) == 1 and oversized.next_cursor
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_logical_streams_are_isolated_on_one_events_database(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     runtime = LocalEventStore(database=database, stream="runtime")

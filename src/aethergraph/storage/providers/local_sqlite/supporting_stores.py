@@ -698,6 +698,33 @@ class LocalDocumentStore:
         )
         clauses = ["d.scope_identity = ?", "d.namespace = ?"]
         values: list[object] = [_scope_identity(query.scope), query.namespace]
+        from_clause = "FROM local_documents AS d"
+        driver = next(iter(query.metadata.items()), None)
+        if driver is not None:
+            key, value = driver
+            alternatives = (value,)
+        elif query.metadata_any:
+            key, alternatives = next(iter(query.metadata_any.items()))
+            driver = (key, alternatives)
+        if driver is not None:
+            # Start at the selective promoted predicate. In particular a rare
+            # diagnosis at the end must not scan every ordered activity head.
+            from_clause = (
+                "FROM local_document_metadata AS primary_filter "
+                "INDEXED BY ix_local_document_metadata_value "
+                "CROSS JOIN local_documents AS d "
+                "ON primary_filter.scope_identity = d.scope_identity "
+                "AND primary_filter.namespace = d.namespace "
+                "AND primary_filter.document_id = d.document_id"
+            )
+            clauses.extend(
+                (
+                    "primary_filter.key = ?",
+                    f"primary_filter.value_json IN ({','.join('?' for _ in alternatives)})",
+                )
+            )
+            values.append(key)
+            values.extend(_json(value) for value in alternatives)
         join = ""
         sort_expression = "d.document_id"
         if query.order_by is not None:
@@ -747,26 +774,27 @@ class LocalDocumentStore:
         values.append(query.page.limit + 1)
         direction = "DESC" if query.descending else "ASC"
         rows = await self._database.fetch_all(
-            f"SELECT d.*, {sort_expression} AS ordering_value FROM local_documents AS d "
+            f"SELECT d.*, {sort_expression} AS ordering_value {from_clause} "
             f"{join} WHERE {' AND '.join(clauses)} "
             f"ORDER BY {sort_expression} {direction}, d.document_id {direction} LIMIT ?",
             values,
         )
         selected = rows[: query.page.limit]
+        anchors = tuple(
+            _encode_cursor(
+                fingerprint,
+                (
+                    _json([row["ordering_value"], row["document_id"]])
+                    if query.order_by is not None
+                    else str(row["document_id"])
+                ),
+            )
+            for row in selected
+        )
         return Page(
             items=tuple(_document(row) for row in selected),
-            next_cursor=(
-                _encode_cursor(
-                    fingerprint,
-                    (
-                        _json([selected[-1]["ordering_value"], selected[-1]["document_id"]])
-                        if query.order_by is not None
-                        else str(selected[-1]["document_id"])
-                    ),
-                )
-                if len(rows) > query.page.limit
-                else None
-            ),
+            next_cursor=anchors[-1] if len(rows) > query.page.limit else None,
+            item_cursors=anchors,
         )
 
     def _require_writable(self) -> None:

@@ -550,21 +550,61 @@ class LocalEventStore:
             clauses.append(f"cursor {'>' if direction == 'ASC' else '<'} ?")
             values.append(anchor)
         values.append(query.page.limit + 1)
+        selection = "*"
+        if query.payload_byte_budget is not None:
+            columns = (
+                "payload_json",
+                "tags_json",
+                "metrics_json",
+                "text",
+                "event_id",
+                "kind",
+                "stage",
+                "topic",
+                "occurred_at",
+                *_SCOPE_FIELDS,
+            )
+            # Only sizes/cursors cross the provider boundary until a prefix fits.
+            sizes = " + ".join(
+                f"length(CAST(coalesce(json_quote({column}), '') AS BLOB))" for column in columns
+            )
+            selection = f"cursor, 1024 + {sizes} AS payload_bytes"
         rows = await self._database.fetch_all(
-            f"SELECT * FROM local_events WHERE {' AND '.join(clauses)} "
+            f"SELECT {selection} FROM local_events WHERE {' AND '.join(clauses)} "
             f"ORDER BY cursor {direction} LIMIT ?",
             values,
         )
         selected = rows[: query.page.limit]
-        next_cursor = None
-        if len(rows) > query.page.limit:
-            next_cursor = _encode_page_cursor(
+        has_more = len(rows) > query.page.limit
+        if query.payload_byte_budget is not None and selected:
+            used = 0
+            count = 0
+            for row in selected:
+                size = int(row["payload_bytes"])
+                if count and used + size > query.payload_byte_budget:
+                    break
+                used += size
+                count += 1
+            has_more = len(rows) > count
+            identities = [int(row["cursor"]) for row in selected[:count]]
+            selected = await self._database.fetch_all(
+                f"SELECT * FROM local_events WHERE cursor IN ({','.join('?' for _ in identities)}) "
+                f"ORDER BY cursor {direction}",
+                identities,
+            )
+        resume_cursor = query.page.cursor
+        if selected:
+            resume_cursor = _encode_page_cursor(
                 stream=self._stream,
                 direction=direction,
                 fingerprint=fingerprint,
                 anchor=int(selected[-1]["cursor"]),
             )
-        return Page(items=tuple(_record(row) for row in selected), next_cursor=next_cursor)
+        return Page(
+            items=tuple(_record(row) for row in selected),
+            next_cursor=resume_cursor if has_more else None,
+            resume_cursor=resume_cursor,
+        )
 
     def _append_sync(
         self,

@@ -422,6 +422,8 @@ class _CanonicalObservabilityFacade:
         since: datetime | None = None,
         until: datetime | None = None,
         order: SortDirection = SortDirection.ASCENDING,
+        include_resume_cursor: bool = False,
+        payload_byte_budget: int | None = None,
     ) -> dict[str, Any]:
         """Read one exact run's canonical Engine-event page in causal storage order.
 
@@ -447,6 +449,9 @@ class _CanonicalObservabilityFacade:
             since: Inclusive UTC occurrence lower bound.
             until: Inclusive UTC occurrence upper bound.
             order: Provider storage ordering direction.
+            include_resume_cursor: Return a tail-safe continuation separately from next_cursor.
+            payload_byte_budget: Optional provider-side body hydration bound; one oversized
+                first item is returned explicitly rather than permanently blocking progress.
         Returns:
             dict: Stable Engine-event mappings and next_cursor.
         Notes:
@@ -467,13 +472,17 @@ class _CanonicalObservabilityFacade:
                 occurred_at_min=since,
                 occurred_at_max=until,
                 order=order,
+                payload_byte_budget=payload_byte_budget,
                 page=page_request,
             )
         )
-        return {
+        result = {
             "items": [_event_mapping(record) for record in page.items],
             "next_cursor": page.next_cursor,
         }
+        if include_resume_cursor:
+            result["resume_cursor"] = page.resume_cursor
+        return result
 
     async def get_engine_event(self, *, run_id: str, event_id: str) -> dict[str, Any] | None:
         """Read one canonical Engine event within its exact authorized physical run.
@@ -1098,13 +1107,15 @@ def open_observability_workspace(
     *,
     identity: ObservabilityIdentity | None = None,
     run_statuses: Mapping[str, str] | None = None,
+    writable: bool = False,
 ) -> _CanonicalObservabilityFacade:
     """Prepare the exact manifested provider for historical observability reads.
 
     Intro:
         Resolves and validates one authorized workspace manifest synchronously, opens
-        exactly its built-in local provider in read-only mode, and defers asynchronous
-        health admission to the first facade operation.
+        exactly its built-in local provider, and defers asynchronous health admission
+        to the first facade operation. Default reads are read-only. Explicit writable
+        preparation admits provider-owned migrations and supporting-store writes.
 
     Examples:
         Open local historical inspection:
@@ -1125,16 +1136,20 @@ def open_observability_workspace(
         workspace_root: Already-authorized opaque AG runtime workspace root.
         identity: Optional request identity applied to every canonical read.
         run_statuses: Optional catalog-owned status overlay for Inspect enrichment.
+        writable: Explicit maintenance/preparation request; False for all routine reads.
 
     Returns:
         ObservabilityFacade: Stable async read facade owning one provider.
 
     Notes:
         Unmanifested, malformed, unsupported, or non-local workspaces fail directly.
-        No legacy layout probe, migration, alternate provider, or writable open occurs.
+        No legacy layout probe or alternate provider occurs. Routine reads never write
+        or migrate. Only an explicitly authorized preparation caller may set writable.
         Intact older schemas raise ``ObservabilityMigrationRequiredError``; other
         open failures remain ``ObservabilityWorkspaceError``.
     """
+    if not isinstance(writable, bool):
+        raise TypeError("writable must be boolean")
     root = Path(workspace_root).expanduser().resolve()
     try:
         manifest = read_local_workspace_manifest(root)
@@ -1153,7 +1168,11 @@ def open_observability_workspace(
             registry,
             frozenset(
                 {
-                    StorageCapability.READ_ONLY_OPEN,
+                    (
+                        StorageCapability.ATOMIC_COMPARE_AND_SET
+                        if writable
+                        else StorageCapability.READ_ONLY_OPEN
+                    ),
                     StorageCapability.HEALTH,
                 }
             ),
@@ -1165,7 +1184,7 @@ def open_observability_workspace(
                 workspace_root=root,
                 owner_scope=manifest.owner_scope,
                 selection=selection,
-                mode=StorageOpenMode.READ_ONLY,
+                mode=StorageOpenMode.READ_WRITE if writable else StorageOpenMode.READ_ONLY,
                 expected_format_version=manifest.format_version,
                 clock=clock,
                 secrets=_UnavailableHistoricalSecrets(),

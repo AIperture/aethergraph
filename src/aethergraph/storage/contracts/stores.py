@@ -65,8 +65,15 @@ class EventQuery:
     occurred_at_min: datetime | None = None
     occurred_at_max: datetime | None = None
     order: SortDirection = SortDirection.DESCENDING
+    payload_byte_budget: int | None = None
 
     def __post_init__(self) -> None:
+        if self.payload_byte_budget is not None and (
+            isinstance(self.payload_byte_budget, bool)
+            or not isinstance(self.payload_byte_budget, int)
+            or not 1024 <= self.payload_byte_budget <= 16 * 1024 * 1024
+        ):
+            raise ValueError("payload_byte_budget must be between 1024 and 16777216")
         for name, values in (("kinds", self.kinds), ("tags", self.tags)):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")

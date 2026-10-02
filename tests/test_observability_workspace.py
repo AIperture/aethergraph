@@ -401,6 +401,22 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
     ]
     assert (tmp_path / "workspace.json").read_text(encoding="utf-8") == manifest_before
 
+    # Writable preparation is explicit and limited to provider-owned contracts.
+    preparation = open_observability_workspace(tmp_path, writable=True)
+    try:
+        scope, documents, kv = await preparation.supporting_stores(run_id="run-1")
+        await documents.compare_and_set(scope, "projection.test", "head", 0, {"kind": "test"}, 1)
+        await kv.compare_and_set(scope, "projection.test", "checkpoint", 0, {"version": 1})
+    finally:
+        await preparation.close()
+    routine = open_observability_workspace(tmp_path)
+    try:
+        scope, documents, kv = await routine.supporting_stores(run_id="run-1")
+        assert (await documents.get(scope, "projection.test", "head")).document["kind"] == "test"
+        assert (await kv.get(scope, "projection.test", "checkpoint")).value["version"] == 1
+    finally:
+        await routine.close()
+
 
 def test_workspace_opener_rejects_unmanifested_history_without_fallback(tmp_path: Path) -> None:
     (tmp_path / "events.db").write_bytes(b"legacy")

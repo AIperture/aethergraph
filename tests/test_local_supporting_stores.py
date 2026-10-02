@@ -290,6 +290,16 @@ async def test_document_alternatives_ranges_ordering_and_snapshot_cursor(tmp_pat
         DocumentQuery(scope=scope, namespace="heads", order_by="rank", descending=True)
     )
     assert [row.document_id for row in ranked.items] == ["c", "d", "b", "a"]
+    resumed = await store.query(
+        DocumentQuery(
+            scope=scope,
+            namespace="heads",
+            order_by="rank",
+            descending=True,
+            page=PageRequest(cursor=ranked.item_cursors[1]),
+        )
+    )
+    assert [row.document_id for row in resumed.items] == ["b", "a"]
     await database.close()
 
 
