@@ -43,6 +43,7 @@ from ...contracts import (
     StorageConfigurationError,
     StorageConflictError,
     StorageIntegrityError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
@@ -305,6 +306,17 @@ class LocalObservationRepository:
         _install(database)
         self._database = database
         self._mode = database.mode
+        if self._mode is not StorageOpenMode.READ_ONLY:
+            database.install_component(
+                name="observation_compact_indexes",
+                version=1,
+                statements=(
+                    "CREATE INDEX ix_local_observations_duration ON local_observations"
+                    "(run_id, json_extract(attributes_json, '$.duration_ms'), occurred_at DESC, sequence DESC)",
+                    "CREATE INDEX ix_local_observations_code ON local_observations"
+                    "(run_id, json_extract(attributes_json, '$.error.code'), occurred_at DESC, sequence DESC)",
+                ),
+            )
 
     async def append_many(
         self, observations: tuple[ObservationDraft, ...]
@@ -412,6 +424,37 @@ class LocalObservationRepository:
             The cursor is bound to every query filter and the requested page size.
         """
         clauses, values = _scope_filters(query.scope, alias="o")
+        if query.observation_ids:
+            clauses.append(f"o.observation_id IN ({','.join('?' for _ in query.observation_ids)})")
+            values.extend(query.observation_ids)
+        indexed_by = ""
+        if (
+            query.error_codes
+            or query.duration_ms_at_least is not None
+            or query.duration_ms_at_most is not None
+        ):
+            components = await self._database.fetch_all(
+                "SELECT version FROM ag_storage_components WHERE name = ?",
+                ("observation_compact_indexes",),
+            )
+            if not components or components[0]["version"] != 1:
+                raise StorageMigrationRequiredError(
+                    "Prepare observation compact indexes with a writable workspace"
+                )
+            indexed_by = " INDEXED BY ix_local_observations_code"
+            if query.error_codes:
+                clauses.append(
+                    f"json_extract(o.attributes_json, '$.error.code') IN ({','.join('?' for _ in query.error_codes)})"
+                )
+                values.extend(query.error_codes)
+            for bound, operator in (
+                (query.duration_ms_at_least, ">="),
+                (query.duration_ms_at_most, "<="),
+            ):
+                if bound is not None:
+                    indexed_by = " INDEXED BY ix_local_observations_duration"
+                    clauses.append(f"json_extract(o.attributes_json, '$.duration_ms') {operator} ?")
+                    values.append(bound)
         if query.categories:
             clauses.append(f"o.category IN ({','.join('?' for _ in query.categories)})")
             values.extend(query.categories)
@@ -454,14 +497,49 @@ class LocalObservationRepository:
             values.extend((timestamp, sequence))
 
         def read(connection: sqlite3.Connection) -> Page[ObservationRecord]:
+            selection = "o.*"
+            if not query.include_payload_metadata:
+                selection = ", ".join(
+                    "o." + column
+                    for column in (
+                        "sequence",
+                        "observation_id",
+                        *_SCOPE_COLUMNS,
+                        "category",
+                        "name",
+                        "occurred_at",
+                        "status",
+                        "severity",
+                        "producer",
+                        "trace_id",
+                        "turn_id",
+                        "parent_observation_id",
+                        "caused_by_observation_id",
+                        "source_event_id",
+                        "payload_fragment_id",
+                        "retention_class",
+                        "expires_at",
+                        "schema_version",
+                    )
+                ) + (
+                    ", substr(o.summary, 1, 201) AS summary, json_object('duration_ms', "
+                    "CASE WHEN json_type(o.attributes_json, '$.duration_ms') IN ('integer', 'real') "
+                    "THEN json_extract(o.attributes_json, '$.duration_ms') END, 'error_code', "
+                    "CASE WHEN json_type(o.attributes_json, '$.error.code') = 'text' "
+                    "THEN substr(json_extract(o.attributes_json, '$.error.code'), 1, 129) END) AS attributes_json"
+                )
             rows = connection.execute(
-                "SELECT o.* FROM local_observations o "
+                f"SELECT {selection} FROM local_observations AS o{indexed_by} "
                 f"WHERE {' AND '.join(clauses)} "
                 "ORDER BY o.occurred_at DESC, o.sequence DESC LIMIT ?",
                 (*values, query.page.limit + 1),
             ).fetchall()
             visible = rows[: query.page.limit]
-            records = _load_observations(connection, visible)
+            records = (
+                _load_observations(connection, visible)
+                if query.include_payload_metadata
+                else tuple(_observation(row, ()) for row in visible)
+            )
             next_cursor = None
             if len(rows) > query.page.limit:
                 anchor = visible[-1]
@@ -470,7 +548,14 @@ class LocalObservationRepository:
                     str(anchor["occurred_at"]),
                     int(anchor["sequence"]),
                 )
-            return Page(items=records, next_cursor=next_cursor)
+            return Page(
+                items=records,
+                next_cursor=next_cursor,
+                item_cursors=tuple(
+                    _encode_cursor(fingerprint, str(row["occurred_at"]), int(row["sequence"]))
+                    for row in visible
+                ),
+            )
 
         return await self._database.read_transaction(read)
 
@@ -2764,6 +2849,19 @@ def _observation_cursor(sequence: int) -> str:
 def _observation_query_fingerprint(query: ObservationQuery) -> str:
     payload = {
         "kind": "observations",
+        **({"observation_ids": list(query.observation_ids)} if query.observation_ids else {}),
+        **({"include_payload_metadata": False} if not query.include_payload_metadata else {}),
+        **({"error_codes": list(query.error_codes)} if query.error_codes else {}),
+        **(
+            {"duration_ms_at_least": query.duration_ms_at_least}
+            if query.duration_ms_at_least is not None
+            else {}
+        ),
+        **(
+            {"duration_ms_at_most": query.duration_ms_at_most}
+            if query.duration_ms_at_most is not None
+            else {}
+        ),
         "scope": query.scope.as_filter(),
         "categories": list(query.categories),
         "names": list(query.names),

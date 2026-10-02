@@ -41,7 +41,10 @@ from aethergraph.storage.contracts import (
     LLMCallQuery,
     LLMCallRecord,
     ObservationCaptureMode,
+    ObservationQuery,
+    ObservationRecord,
     ObservationScopeManagementQuery,
+    ObservationSeverity,
     ObservationStatus,
     Page,
     PageRequest,
@@ -619,6 +622,88 @@ class _CanonicalObservabilityFacade:
         )
         if any(record.observation.trace_id in hidden["trace_id"] for record in page.items):
             raise ObservabilityUnavailableError("Selected LLM metadata is suppressed")
+        return page
+
+    async def page_observation_records(
+        self,
+        *,
+        run_id: str,
+        categories: tuple[str, ...],
+        limit: int = 20,
+        cursor: str | None = None,
+        observation_ids: tuple[str, ...] = (),
+        names: tuple[str, ...] = (),
+        producers: tuple[str, ...] = (),
+        statuses: tuple[str, ...] = (),
+        severities: tuple[str, ...] = (),
+        error_codes: tuple[str, ...] = (),
+        duration_ms_at_least: float | None = None,
+        duration_ms_at_most: float | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Page[ObservationRecord]:
+        """Read compact canonical observations from one accessible physical run.
+
+        Intro:
+            The provider excludes attributes and resource inventories before hydration.
+        Examples:
+            ```python
+            page = await facade.page_observation_records(run_id="run-1", categories=("log",))
+            ```
+            ```python
+            page = await facade.page_observation_records(run_id="run-1", categories=("trace",), observation_ids=("span-1",))
+            ```
+        Args:
+            run_id: Exact accessible owner.
+            categories: Canonical category alternatives.
+            limit: Maximum metadata rows.
+            cursor: Native scope and selection bound continuation.
+            observation_ids: Exact identities belonging to this owner.
+            names: Exact observation names.
+            producers: Exact producer alternatives.
+            statuses: Canonical status alternatives.
+            severities: Canonical severity alternatives.
+            error_codes: Exact recorded error codes.
+            duration_ms_at_least: Inclusive numeric duration lower bound.
+            duration_ms_at_most: Inclusive numeric duration upper bound.
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
+        Returns:
+            Page: Compact metadata with exact per-row anchors.
+        Notes:
+            Only duration and a bounded error code remain in attributes. Older
+            workspaces require writable preparation for indexed scalar predicates.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("Observation owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("Observation owner is unavailable")
+        page = await (await self._bundle()).observations.query(
+            ObservationQuery(
+                scope=scope,
+                page=PageRequest(limit=limit, cursor=cursor),
+                categories=categories,
+                observation_ids=observation_ids,
+                include_payload_metadata=False,
+                names=names,
+                producers=producers,
+                statuses=tuple(ObservationStatus(value) for value in statuses),
+                severities=tuple(ObservationSeverity(value) for value in severities),
+                error_codes=error_codes,
+                duration_ms_at_least=duration_ms_at_least,
+                duration_ms_at_most=duration_ms_at_most,
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+            )
+        )
+        if any(record.trace_id in hidden["trace_id"] for record in page.items):
+            raise ObservabilityUnavailableError("Selected observation is suppressed")
         return page
 
     async def supporting_stores(

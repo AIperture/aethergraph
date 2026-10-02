@@ -280,6 +280,11 @@ class ObservationQuery:
     resource_relation: ObservationResourceRelation | None = None
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
+    observation_ids: tuple[str, ...] = ()
+    include_payload_metadata: bool = True
+    error_codes: tuple[str, ...] = ()
+    duration_ms_at_least: float | None = None
+    duration_ms_at_most: float | None = None
 
     def __post_init__(self) -> None:
         for name, values in (
@@ -288,6 +293,8 @@ class ObservationQuery:
             ("producers", self.producers),
             ("statuses", self.statuses),
             ("severities", self.severities),
+            ("observation_ids", self.observation_ids),
+            ("error_codes", self.error_codes),
         ):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -297,9 +304,28 @@ class ObservationQuery:
             ("categories", self.categories),
             ("names", self.names),
             ("producers", self.producers),
+            ("observation_ids", self.observation_ids),
+            ("error_codes", self.error_codes),
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
+        if len(self.observation_ids) > 100 or len(self.error_codes) > 100:
+            raise ValueError("Exact observation selectors allow at most 100 values")
+        if type(self.include_payload_metadata) is not bool:
+            raise TypeError("include_payload_metadata must be boolean")
+        import math
+
+        for value in (self.duration_ms_at_least, self.duration_ms_at_most):
+            if value is not None and (
+                type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError("Duration bounds must be finite non-negative numbers")
+        if (
+            self.duration_ms_at_least is not None
+            and self.duration_ms_at_most is not None
+            and self.duration_ms_at_least > self.duration_ms_at_most
+        ):
+            raise ValueError("Duration bounds are reversed")
         if any(not isinstance(value, ObservationStatus) for value in self.statuses):
             raise TypeError("statuses must contain ObservationStatus values")
         if any(not isinstance(value, ObservationSeverity) for value in self.severities):
