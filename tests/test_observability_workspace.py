@@ -352,6 +352,13 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
     assert compact_calls.items[0].llm_call_id == "call-1"
     assert compact_calls.items[0].request_options == {} and not compact_calls.items[0].attempts
     assert len(compact_calls.item_cursors) == 1
+    assert not (await facade.page_llm_call_records(run_id="run-1", models=("missing",))).items
+    assert not (await facade.page_llm_call_records(run_id="run-1", statuses=("error",))).items
+    assert (
+        await facade.page_llm_call_records(
+            run_id="run-1", providers=("openai",), since=NOW, until=NOW
+        )
+    ).items
     with pytest.raises(ObservabilityUnavailableError):
         await facade.page_llm_call_records(run_id="foreign", llm_call_ids=("call-1",))
     assert bound_scope.project_id == "project-1" and bound_scope.run_id == "run-1"

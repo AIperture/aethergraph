@@ -42,6 +42,7 @@ from aethergraph.storage.contracts import (
     LLMCallRecord,
     ObservationCaptureMode,
     ObservationScopeManagementQuery,
+    ObservationStatus,
     Page,
     PageRequest,
     RunQuery,
@@ -528,6 +529,12 @@ class _CanonicalObservabilityFacade:
         cursor: str | None = None,
         llm_call_ids: tuple[str, ...] = (),
         include_payload_metadata: bool = False,
+        providers: tuple[str, ...] = (),
+        models: tuple[str, ...] = (),
+        call_types: tuple[str, ...] = (),
+        statuses: tuple[str, ...] = (),
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> Page[LLMCallRecord]:
         """Read exact-run canonical LLM metadata without captured body hydration.
 
@@ -548,6 +555,12 @@ class _CanonicalObservabilityFacade:
             llm_call_ids: Optional exact identities, combined with run ownership.
             include_payload_metadata: Explicitly include inventories/previews/attempts;
                 captured request/response bodies remain excluded in either mode.
+            providers: Exact provider alternatives.
+            models: Exact model alternatives.
+            call_types: Exact logical call-type alternatives.
+            statuses: Exact canonical observation statuses (ok/error/pending/unknown).
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
         Returns:
             Page: Native generic record metadata and per-item pagination anchors.
         Notes:
@@ -571,6 +584,12 @@ class _CanonicalObservabilityFacade:
                 page=PageRequest(limit=limit, cursor=cursor),
                 llm_call_ids=llm_call_ids,
                 include_payload_metadata=include_payload_metadata,
+                providers=providers,
+                models=models,
+                call_types=call_types,
+                statuses=tuple(ObservationStatus(value) for value in statuses),
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
             )
         )
         if any(record.observation.trace_id in hidden["trace_id"] for record in page.items):
