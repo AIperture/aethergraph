@@ -404,6 +404,43 @@ class EventStore(Protocol):
         """
         ...
 
+    async def read_payload_chunk(
+        self,
+        scope: StorageScope,
+        event_id: str,
+        *,
+        json_path: str,
+        offset: int = 0,
+        limit: int = 4096,
+        match_key: str | None = None,
+        match_value: str | None = None,
+    ) -> Mapping[str, FrozenJson] | None:
+        """Read bounded serialized JSON from one exact immutable Event payload.
+
+        Examples:
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.summary")
+            ```
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.steps", match_key="id", match_value="step-1")
+            ```
+        Args:
+            scope: Populated exact owner and execution constraints.
+            event_id: Immutable stream-unique identity.
+            json_path: Explicit simple object/array path in the canonical payload.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            match_key: Optional simple key selecting one array object.
+            match_value: Exact string identity; requires match_key.
+        Returns:
+            Mapping | None: Fixed Event header, selected text and continuation facts;
+                absent owner returns None and absent section is explicit.
+        Notes:
+            Array identities must be unique. No unselected content is hydrated.
+            Concatenate text chunks before parsing; Event immutability pins content.
+        """
+        ...
+
     async def get_many(
         self,
         scope: StorageScope,

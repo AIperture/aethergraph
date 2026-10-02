@@ -759,6 +759,65 @@ class _CanonicalObservabilityFacade:
             raise ObservabilityUnavailableError("Selected call content is unavailable")
         return result
 
+    async def read_engine_event_chunk(
+        self,
+        *,
+        run_id: str,
+        event_id: str,
+        json_path: str,
+        offset: int = 0,
+        limit: int = 4096,
+        match_key: str | None = None,
+        match_value: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Read a selected Engine-event payload path without whole-record hydration.
+
+        Intro:
+            Validates the exact canonical run and Engine tag before returning only
+            the provider's bounded selected JSON text.
+        Examples:
+            ```python
+            chunk = await facade.read_engine_event_chunk(run_id="run-1", event_id="event-1", json_path="$.data.plan")
+            ```
+            ```python
+            chunk = await facade.read_engine_event_chunk(run_id="run-1", event_id="event-1", json_path="$.data.plan.steps", match_key="step_id", match_value="step-1")
+            ```
+        Args:
+            run_id: Exact accessible physical owner.
+            event_id: Exact immutable memory Event identity.
+            json_path: Explicit simple canonical payload path.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            match_key: Optional exact array-object identity key.
+            match_value: Exact string identity paired with match_key.
+        Returns:
+            Mapping: Bounded JSON text, immutable source identity and availability.
+        Notes:
+            Unselected payloads and full Event objects are never hydrated.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("Selected Event owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("Selected Event owner is unavailable")
+        chunk = await (await self._bundle()).memory_events.read_payload_chunk(
+            scope,
+            event_id,
+            json_path=json_path,
+            offset=offset,
+            limit=limit,
+            match_key=match_key,
+            match_value=match_value,
+        )
+        if chunk is None or "agent_engine" not in chunk["tags"]:
+            raise ObservabilityUnavailableError("Selected Engine Event is unavailable")
+        return chunk
+
     async def supporting_stores(
         self, *, run_id: str
     ) -> tuple[StorageScope, DocumentStore, KeyValueStore]:
