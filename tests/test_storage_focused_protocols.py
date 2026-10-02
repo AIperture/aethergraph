@@ -171,6 +171,32 @@ class _EventStore:
         next_cursor = f"page-{next_index}" if next_index < len(rows) else None
         return Page(items=selected, next_cursor=next_cursor)
 
+    async def read_payload_chunk(
+        self, scope, event_id, *, json_path, offset=0, limit=4096, match_key=None, match_value=None
+    ):
+        from storage_conformance.selected_content import chunk, select
+
+        row = await self.get(scope, event_id)
+        if row is None:
+            return None
+        value = select(row.payload, json_path, match_key, match_value)
+        return chunk(
+            value,
+            {
+                "event_id": event_id,
+                "kind": row.kind,
+                "tags": list(row.tags),
+                "occurred_at": row.occurred_at.isoformat(),
+                "json_path": json_path,
+                "match_key": match_key,
+                "match_value": match_value,
+                "encoding": "serialized_json_text",
+            },
+            offset=offset,
+            limit=limit,
+            reason="section_not_retained",
+        )
+
 
 class _StateStore:
     def __init__(self) -> None:
