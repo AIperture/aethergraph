@@ -39,8 +39,10 @@ from aethergraph.storage.contracts import (
     EventQuery,
     KeyValueStore,
     LLMCallQuery,
+    LLMCallRecord,
     ObservationCaptureMode,
     ObservationScopeManagementQuery,
+    Page,
     PageRequest,
     RunQuery,
     SortDirection,
@@ -517,6 +519,63 @@ class _CanonicalObservabilityFacade:
         if record is None or "agent_engine" not in record.tags:
             return None
         return _event_mapping(record)
+
+    async def page_llm_call_records(
+        self,
+        *,
+        run_id: str,
+        limit: int = 20,
+        cursor: str | None = None,
+        llm_call_ids: tuple[str, ...] = (),
+        include_payload_metadata: bool = False,
+    ) -> Page[LLMCallRecord]:
+        """Read exact-run canonical LLM metadata without captured body hydration.
+
+        Intro:
+            Compact selection is performed by the provider before inventory,
+            preview, options or attempt payloads enter Python.
+        Examples:
+            ```python
+            page = await facade.page_llm_call_records(run_id="run-1")
+            ```
+            ```python
+            page = await facade.page_llm_call_records(run_id="run-1", llm_call_ids=("call-1",))
+            ```
+        Args:
+            run_id: Exact accessible physical run owning the records.
+            limit: Canonical provider page size.
+            cursor: Opaque continuation bound to scope and compact selection.
+            llm_call_ids: Optional exact identities, combined with run ownership.
+            include_payload_metadata: Explicitly include inventories/previews/attempts;
+                captured request/response bodies remain excluded in either mode.
+        Returns:
+            Page: Native generic record metadata and per-item pagination anchors.
+        Notes:
+            Suppressed or absent owners fail visibly. Usage remains the provider's
+            receipt; consumers own normalization and product scope presentation.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("LLM metadata owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("LLM metadata owner is unavailable")
+        bundle = await self._bundle()
+        page = await bundle.observations.query_llm_calls(
+            LLMCallQuery(
+                scope=scope,
+                page=PageRequest(limit=limit, cursor=cursor),
+                llm_call_ids=llm_call_ids,
+                include_payload_metadata=include_payload_metadata,
+            )
+        )
+        if any(record.observation.trace_id in hidden["trace_id"] for record in page.items):
+            raise ObservabilityUnavailableError("Selected LLM metadata is suppressed")
+        return page
 
     async def supporting_stores(
         self, *, run_id: str

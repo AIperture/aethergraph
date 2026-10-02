@@ -618,6 +618,67 @@ async def test_llm_full_capture_is_atomic_idempotent_and_detail_only(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_compact_llm_selection_excludes_large_inventory_before_decoding(
+    tmp_path, monkeypatch
+):
+    import aethergraph.storage.providers.local_sqlite.observation_repository as module
+
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    large = "inventory-must-not-be-decoded" * 20000
+    for identity in ("call-1", "call-2"):
+        await _store_llm_call(
+            repository, replace(_llm_call(identity), request_options={"large": large})
+        )
+    original = module._loaded_llm_request_options
+
+    def checked(value):
+        assert "large" not in value
+        return original(value)
+
+    monkeypatch.setattr(module, "_loaded_llm_request_options", checked)
+    query = LLMCallQuery(scope=SCOPE, include_payload_metadata=False, page=PageRequest(limit=1))
+    first = await repository.query_llm_calls(query)
+    assert first.next_cursor and len(first.item_cursors) == 1
+    record = first.items[0]
+    assert record.request_options == {} and record.request_preview is None and not record.attempts
+    second = await repository.query_llm_calls(
+        replace(query, page=PageRequest(limit=1, cursor=first.next_cursor))
+    )
+    assert second.items[0].llm_call_id != record.llm_call_id
+    assert not second.next_cursor
+    exact = await repository.query_llm_calls(replace(query, llm_call_ids=(record.llm_call_id,)))
+    assert exact.items[0].llm_call_id == record.llm_call_id
+    assert not (
+        await repository.query_llm_calls(replace(query, scope=StorageScope(run_id="foreign")))
+    ).items
+    with pytest.raises(StorageConfigurationError):
+        await repository.query_llm_calls(
+            replace(
+                query,
+                include_payload_metadata=True,
+                page=PageRequest(limit=1, cursor=first.next_cursor),
+            )
+        )
+    await database.close()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"include_payload_metadata": 1},
+        {"llm_call_ids": ["call"]},
+        {"llm_call_ids": ("call", "call")},
+        {"llm_call_ids": ("",)},
+        {"llm_call_ids": tuple(str(index) for index in range(101))},
+    ],
+)
+def test_compact_llm_query_rejects_invalid_selection(arguments):
+    with pytest.raises((TypeError, ValueError)):
+        LLMCallQuery(scope=SCOPE, **arguments)
+
+
+@pytest.mark.asyncio
 async def test_llm_begin_remains_truthfully_in_progress_without_finish(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     repository = LocalObservationRepository(database=database)

@@ -348,6 +348,12 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
         "items"
     ] == []
     bound_scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+    compact_calls = await facade.page_llm_call_records(run_id="run-1", llm_call_ids=("call-1",))
+    assert compact_calls.items[0].llm_call_id == "call-1"
+    assert compact_calls.items[0].request_options == {} and not compact_calls.items[0].attempts
+    assert len(compact_calls.item_cursors) == 1
+    with pytest.raises(ObservabilityUnavailableError):
+        await facade.page_llm_call_records(run_id="foreign", llm_call_ids=("call-1",))
     assert bound_scope.project_id == "project-1" and bound_scope.run_id == "run-1"
     assert await documents.get(bound_scope, "projection.test", "missing") is None
     from aethergraph.storage.contracts import StorageReadOnlyError

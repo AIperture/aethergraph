@@ -795,6 +795,7 @@ class LocalObservationRepository:
             values.append(query.trace_id)
         for column, selected in (
             ("provider", query.providers),
+            ("llm_call_id", query.llm_call_ids),
             ("model", query.models),
             ("call_type", query.call_types),
             ("prompt_manifest_id", query.prompt_manifest_ids),
@@ -818,8 +819,33 @@ class LocalObservationRepository:
             values.extend((timestamp, sequence))
 
         def read(connection: sqlite3.Connection) -> Page[LLMCallRecord]:
+            selected_columns = "l.*"
+            if not query.include_payload_metadata:
+                selected_columns = (
+                    ",".join(
+                        "l." + name
+                        for name in (
+                            "llm_call_id",
+                            "observation_id",
+                            "call_type",
+                            "provider",
+                            "model",
+                            "capture_mode",
+                            "lifecycle_status",
+                            "profile_name",
+                            "call_name",
+                            "usage_json",
+                            "latency_ms",
+                            "error_type",
+                            "error_message",
+                            "prompt_manifest_id",
+                            "schema_version",
+                        )
+                    )
+                    + ", '{}' AS request_options_json, 'null' AS request_preview_json, 'null' AS response_preview_json, 'null' AS trace_payload_preview_json"
+                )
             rows = connection.execute(
-                "SELECT l.*, o.occurred_at AS page_occurred_at, "
+                f"SELECT {selected_columns}, o.occurred_at AS page_occurred_at, "
                 "o.sequence AS page_sequence "
                 "FROM local_llm_calls l JOIN local_observations o "
                 "ON o.observation_id = l.observation_id "
@@ -828,7 +854,9 @@ class LocalObservationRepository:
                 (*values, query.page.limit + 1),
             ).fetchall()
             visible = rows[: query.page.limit]
-            records = _load_llm_records(connection, visible)
+            records = _load_llm_records(
+                connection, visible, include_attempts=query.include_payload_metadata
+            )
             next_cursor = None
             if len(rows) > query.page.limit:
                 anchor = visible[-1]
@@ -837,7 +865,16 @@ class LocalObservationRepository:
                     str(anchor["page_occurred_at"]),
                     int(anchor["page_sequence"]),
                 )
-            return Page(items=records, next_cursor=next_cursor)
+            return Page(
+                items=records,
+                next_cursor=next_cursor,
+                item_cursors=tuple(
+                    _encode_cursor(
+                        fingerprint, str(row["page_occurred_at"]), int(row["page_sequence"])
+                    )
+                    for row in visible
+                ),
+            )
 
         return await self._database.read_transaction(read)
 
@@ -1618,6 +1655,8 @@ def _load_llm_record(connection: sqlite3.Connection, row: sqlite3.Row) -> LLMCal
 def _load_llm_records(
     connection: sqlite3.Connection,
     rows: Sequence[sqlite3.Row],
+    *,
+    include_attempts: bool = True,
 ) -> tuple[LLMCallRecord, ...]:
     if not rows:
         return ()
@@ -1634,12 +1673,16 @@ def _load_llm_records(
     observations = {
         record.observation_id: record for record in _load_observations(connection, observation_rows)
     }
-    attempt_rows = connection.execute(
-        "SELECT * FROM local_llm_attempts WHERE llm_call_id IN ("
-        + call_placeholders
-        + ") ORDER BY llm_call_id, attempt_number",
-        call_ids,
-    ).fetchall()
+    attempt_rows = (
+        connection.execute(
+            "SELECT * FROM local_llm_attempts WHERE llm_call_id IN ("
+            + call_placeholders
+            + ") ORDER BY llm_call_id, attempt_number",
+            call_ids,
+        ).fetchall()
+        if include_attempts
+        else ()
+    )
     attempts = _attempts_by_call(attempt_rows)
     try:
         return tuple(
@@ -2713,6 +2756,8 @@ def _observation_query_fingerprint(query: ObservationQuery) -> str:
 def _llm_query_fingerprint(query: LLMCallQuery) -> str:
     payload = {
         "kind": "llm-calls",
+        **({"include_payload_metadata": False} if not query.include_payload_metadata else {}),
+        **({"llm_call_ids": list(query.llm_call_ids)} if query.llm_call_ids else {}),
         "scope": query.scope.as_filter(),
         "trace_id": query.trace_id,
         "providers": list(query.providers),

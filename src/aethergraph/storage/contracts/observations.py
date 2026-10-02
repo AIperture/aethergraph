@@ -600,7 +600,14 @@ class LLMCallDetail:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LLMCallQuery:
-    """Bounded indexed LLM-call query returning metadata-only records."""
+    """Bounded indexed LLM-call query returning metadata-only records.
+
+    Exact call IDs combine with all other filters. Compact selection excludes
+    request options, inventories, previews and attempt payloads before hydration;
+    usage receipts and canonical correlation identities remain available. The
+    default preserves existing metadata pages. Neither mode retrieves captured
+    prompt or response bodies. Selection is bound into continuation cursors.
+    """
 
     scope: StorageScope
     page: PageRequest = PageRequest()
@@ -610,10 +617,14 @@ class LLMCallQuery:
     call_types: tuple[str, ...] = ()
     prompt_manifest_ids: tuple[str, ...] = ()
     statuses: tuple[ObservationStatus, ...] = ()
+    llm_call_ids: tuple[str, ...] = ()
+    include_payload_metadata: bool = True
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.include_payload_metadata, bool):
+            raise TypeError("include_payload_metadata must be a boolean")
         _optional_nonempty("trace_id", self.trace_id)
         for name, values in (
             ("providers", self.providers),
@@ -621,6 +632,7 @@ class LLMCallQuery:
             ("call_types", self.call_types),
             ("prompt_manifest_ids", self.prompt_manifest_ids),
             ("statuses", self.statuses),
+            ("llm_call_ids", self.llm_call_ids),
         ):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -634,6 +646,10 @@ class LLMCallQuery:
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
+        if len(self.llm_call_ids) > 100 or any(
+            not isinstance(value, str) or not value.strip() for value in self.llm_call_ids
+        ):
+            raise ValueError("llm_call_ids must contain at most 100 non-empty strings")
         if any(not isinstance(value, ObservationStatus) for value in self.statuses):
             raise TypeError("statuses must contain ObservationStatus values")
         for name in ("occurred_at_or_after", "occurred_at_or_before"):
