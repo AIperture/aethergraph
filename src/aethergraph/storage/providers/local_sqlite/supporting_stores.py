@@ -649,8 +649,10 @@ class LocalDocumentStore:
     async def query(self, query: DocumentQuery) -> Page[DocumentRecord]:
         """Query one bounded stable document-identity page.
 
-        Exact scope, namespace, identifier prefix, and top-level metadata filter
-        before opaque cursor pagination.
+        Intro:
+            Exact scope, namespace, identifier prefix, and top-level metadata filter
+            before opaque cursor pagination. Alternatives within a key are OR; keys
+            are AND. String range and ordering keys use canonical JSON collation.
 
         Examples:
             List registry manifests:
@@ -664,15 +666,21 @@ class LocalDocumentStore:
                 ```
 
         Args:
-            query: Exact canonical filters and page request.
+            query: Exact canonical filters, inclusive string bounds, optional string
+                metadata ordering, direction, and opaque page request.
 
         Returns:
             Page[DocumentRecord]: Matching documents and continuation cursor.
 
         Notes:
             Metadata is normalized and filtered in SQL, never after an unbounded read.
+            Owners encode timestamps/numeric rankings into sortable string keys.
+            Missing or non-string ordering values are excluded, not guessed.
         """
-        if len(query.metadata) > _MAX_METADATA_FILTERS:
+        filters = (query.metadata, query.metadata_any, query.metadata_min, query.metadata_max)
+        if sum(map(len, filters)) > _MAX_METADATA_FILTERS or any(
+            len(values) > _MAX_METADATA_FILTERS for values in query.metadata_any.values()
+        ):
             raise StorageConfigurationError(
                 f"Document query exceeds {_MAX_METADATA_FILTERS} metadata filters"
             )
@@ -682,34 +690,80 @@ class LocalDocumentStore:
             query.namespace,
             query.id_prefix or "",
             _json(query.metadata),
+            _json(query.metadata_any),
+            _json(query.metadata_min),
+            _json(query.metadata_max),
+            query.order_by or "",
+            str(query.descending),
         )
         clauses = ["d.scope_identity = ?", "d.namespace = ?"]
         values: list[object] = [_scope_identity(query.scope), query.namespace]
-        _prefix_filter(clauses, values, "d.document_id", query.id_prefix)
-        for index, (key, value) in enumerate(sorted(query.metadata.items())):
-            alias = f"m{index}"
-            clauses.append(
-                "EXISTS (SELECT 1 FROM local_document_metadata AS "
-                f"{alias} WHERE {alias}.scope_identity = d.scope_identity "
-                f"AND {alias}.namespace = d.namespace "
-                f"AND {alias}.document_id = d.document_id "
-                f"AND {alias}.key = ? AND {alias}.value_json = ?)"
+        join = ""
+        sort_expression = "d.document_id"
+        if query.order_by is not None:
+            join = (
+                "JOIN local_document_metadata AS ordering "
+                "ON ordering.scope_identity = d.scope_identity "
+                "AND ordering.namespace = d.namespace "
+                "AND ordering.document_id = d.document_id "
             )
-            values.extend((key, _json(value)))
+            clauses.extend(("ordering.key = ?", "json_type(ordering.value_json) = 'text'"))
+            values.append(query.order_by)
+            sort_expression = "ordering.value_json"
+        _prefix_filter(clauses, values, "d.document_id", query.id_prefix)
+        for mapping, operator in zip(filters, ("=", "IN", ">=", "<="), strict=True):
+            for key, value in sorted(mapping.items()):
+                alternatives = value if operator == "IN" else (value,)
+                predicate = (
+                    f"m.value_json IN ({','.join('?' for _ in alternatives)})"
+                    if operator == "IN"
+                    else f"m.value_json {operator} ?"
+                )
+                if operator in {">=", "<="}:
+                    predicate += " AND json_type(m.value_json) = 'text'"
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM local_document_metadata AS m "
+                    "WHERE m.scope_identity = d.scope_identity "
+                    "AND m.namespace = d.namespace AND m.document_id = d.document_id "
+                    f"AND m.key = ? AND {predicate})"
+                )
+                values.append(key)
+                values.extend(_json(item) for item in alternatives)
+        comparator = "<" if query.descending else ">"
         if query.page.cursor is not None:
-            clauses.append("d.document_id > ?")
-            values.append(_decode_cursor(query.page.cursor, fingerprint))
+            position = _decode_cursor(query.page.cursor, fingerprint)
+            if query.order_by is None:
+                clauses.append(f"d.document_id {comparator} ?")
+                values.append(position)
+            else:
+                try:
+                    sort_value, document_id = json.loads(position)
+                    if not isinstance(sort_value, str) or not isinstance(document_id, str):
+                        raise ValueError("ordered cursor position")
+                except (ValueError, TypeError) as exc:
+                    raise StorageConfigurationError("Invalid ordered document cursor") from exc
+                clauses.append(f"({sort_expression}, d.document_id) {comparator} (?, ?)")
+                values.extend((sort_value, document_id))
         values.append(query.page.limit + 1)
+        direction = "DESC" if query.descending else "ASC"
         rows = await self._database.fetch_all(
-            f"SELECT d.* FROM local_documents AS d WHERE {' AND '.join(clauses)} "
-            "ORDER BY d.document_id ASC LIMIT ?",
+            f"SELECT d.*, {sort_expression} AS ordering_value FROM local_documents AS d "
+            f"{join} WHERE {' AND '.join(clauses)} "
+            f"ORDER BY {sort_expression} {direction}, d.document_id {direction} LIMIT ?",
             values,
         )
         selected = rows[: query.page.limit]
         return Page(
             items=tuple(_document(row) for row in selected),
             next_cursor=(
-                _encode_cursor(fingerprint, str(selected[-1]["document_id"]))
+                _encode_cursor(
+                    fingerprint,
+                    (
+                        _json([selected[-1]["ordering_value"], selected[-1]["document_id"]])
+                        if query.order_by is not None
+                        else str(selected[-1]["document_id"])
+                    ),
+                )
                 if len(rows) > query.page.limit
                 else None
             ),

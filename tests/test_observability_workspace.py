@@ -336,6 +336,26 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
         "items": engine_events,
         "next_cursor": None,
     }
+    assert await facade.get_engine_event(run_id="run-1", event_id="engine-1") == engine_events[0]
+    assert await facade.get_engine_event(run_id="other", event_id="engine-1") is None
+    assert await facade.get_engine_event(run_id="run-1", event_id="missing") is None
+    assert (
+        await facade.page_engine_events(
+            run_id="run-1", kinds=("agent_engine.decision",), since=NOW, until=NOW
+        )
+    )["items"] == engine_events
+    assert (await facade.page_engine_events(run_id="run-1", kinds=("agent_engine.tool_result",)))[
+        "items"
+    ] == []
+    bound_scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+    assert bound_scope.project_id == "project-1" and bound_scope.run_id == "run-1"
+    assert await documents.get(bound_scope, "projection.test", "missing") is None
+    from aethergraph.storage.contracts import StorageReadOnlyError
+
+    with pytest.raises(StorageReadOnlyError):
+        await kv.compare_and_set(bound_scope, "projection.test", "checkpoint", 0, {})
+    with pytest.raises(ObservabilityUnavailableError):
+        await facade.supporting_stores(run_id="other")
     assert await facade.page_runs(session_id="missing-session") == {
         "items": [],
         "next_cursor": None,

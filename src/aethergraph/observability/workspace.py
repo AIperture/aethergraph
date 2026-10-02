@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,9 @@ from aethergraph.services.control.canonical_stores import (
 )
 from aethergraph.storage.composition import StorageComposition
 from aethergraph.storage.contracts import (
+    DocumentStore,
     EventQuery,
+    KeyValueStore,
     LLMCallQuery,
     ObservationCaptureMode,
     ObservationScopeManagementQuery,
@@ -408,7 +411,17 @@ class _CanonicalObservabilityFacade:
         }
 
     async def page_engine_events(
-        self, *, run_id: str, limit: int = 100, cursor: str | None = None
+        self,
+        *,
+        run_id: str,
+        limit: int = 100,
+        cursor: str | None = None,
+        kinds: tuple[str, ...] = (),
+        stage: str | None = None,
+        topic: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        order: SortDirection = SortDirection.ASCENDING,
     ) -> dict[str, Any]:
         """Read one exact run's canonical Engine-event page in causal storage order.
 
@@ -428,6 +441,12 @@ class _CanonicalObservabilityFacade:
             run_id: Exact canonical run identity.
             limit: Provider page size, at most 1,000.
             cursor: Opaque continuation for that run.
+            kinds: Exact canonical kinds, matched as alternatives.
+            stage: Optional exact authored stage, distinct from a lifecycle phase.
+            topic: Optional exact authored topic.
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
+            order: Provider storage ordering direction.
         Returns:
             dict: Stable Engine-event mappings and next_cursor.
         Notes:
@@ -442,7 +461,12 @@ class _CanonicalObservabilityFacade:
             EventQuery(
                 scope=scope,
                 tags=("agent_engine",),
-                order=SortDirection.ASCENDING,
+                kinds=kinds,
+                stage=stage,
+                topic=topic,
+                occurred_at_min=since,
+                occurred_at_max=until,
+                order=order,
                 page=page_request,
             )
         )
@@ -450,6 +474,77 @@ class _CanonicalObservabilityFacade:
             "items": [_event_mapping(record) for record in page.items],
             "next_cursor": page.next_cursor,
         }
+
+    async def get_engine_event(self, *, run_id: str, event_id: str) -> dict[str, Any] | None:
+        """Read one canonical Engine event within its exact authorized physical run.
+
+        Intro:
+            Performs one scoped identity lookup without replaying a timeline.
+
+        Examples:
+            Read a recorded event:
+            ```python
+            event = await facade.get_engine_event(run_id="run-1", event_id="event-1")
+            ```
+            Reject a different run's event:
+            ```python
+            assert await facade.get_engine_event(run_id="other", event_id="event-1") is None
+            ```
+
+        Args:
+            run_id: Exact authorized physical execution identity.
+            event_id: Exact canonical event identity, without projection suffixes.
+
+        Returns:
+            dict | None: The authored envelope, or None for missing/foreign/non-Engine events.
+
+        Notes:
+            Engine owns projected identifiers and diagnostic classification.
+        """
+        scope = self._query_scope(run_id=run_id)
+        if scope is None:
+            return None
+        record = await (await self._bundle()).memory_events.get(scope, event_id)
+        if record is None or "agent_engine" not in record.tags:
+            return None
+        return _event_mapping(record)
+
+    async def supporting_stores(
+        self, *, run_id: str
+    ) -> tuple[StorageScope, DocumentStore, KeyValueStore]:
+        """Bind generic supporting stores to an accessible exact run's owner scope.
+
+        Intro:
+            Allows a higher-level owner to persist disposable read projections using
+            canonical document/CAS contracts without opening provider-private files.
+
+        Examples:
+            Read an owner's projection checkpoint:
+            ```python
+            scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+            checkpoint = await kv.get(scope, "projection.v1", "checkpoint")
+            ```
+            Read a projected head:
+            ```python
+            scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+            head = await documents.get(scope, "projection.v1", "event-1")
+            ```
+
+        Args:
+            run_id: Exact run whose canonical accessibility must be verified first.
+
+        Returns:
+            tuple: Bound scope, generic document store and generic revisioned KV store.
+
+        Notes:
+            Historical readers remain read-only; writes fail through provider contracts.
+            This operation never starts a runtime, opens a writable store or migrates data.
+        """
+        scope = self._query_scope(run_id=run_id)
+        if scope is None or await self.get_run(run_id) is None:
+            raise ObservabilityUnavailableError("Supporting read scope is unavailable")
+        bundle = await self._bundle()
+        return scope, bundle.documents, bundle.kv
 
     async def list_runs(
         self,
