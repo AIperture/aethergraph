@@ -149,6 +149,7 @@ async def test_local_provider_opens_one_coherent_bundle_and_closes_cleanly(
     assert bundle.format_version == 1
     assert bundle.mode is StorageOpenMode.READ_WRITE
     assert (await bundle.health()).ready is True
+    assert (await bundle.check_integrity()).ready is True
     for field_name in get_type_hints(StorageBundle):
         assert hasattr(bundle, field_name), field_name
     assert bundle.auth_grants is bundle.kv
@@ -174,6 +175,7 @@ async def test_local_provider_opens_one_coherent_bundle_and_closes_cleanly(
     assert manifest.clean_shutdown is True
     assert manifest.last_maintenance_at is not None
     assert (await bundle.health()).ready is False
+    assert (await bundle.check_integrity()).ready is False
 
 
 @pytest.mark.asyncio
@@ -294,6 +296,7 @@ async def test_read_only_historical_open_preserves_manifest_and_rejects_maintena
     readonly = _provider().open(_request(tmp_path, mode=StorageOpenMode.READ_ONLY))
 
     assert (await readonly.health()).ready is True
+    assert (await readonly.check_integrity()).ready is True
     with pytest.raises(StorageReadOnlyError):
         readonly.runtime_output.emit(_frame())
     with pytest.raises(StorageReadOnlyError):

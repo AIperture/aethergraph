@@ -485,7 +485,7 @@ class LocalSQLiteDatabase:
         return await self._run(transactional)
 
     async def health(self) -> StorageHealth:
-        """Run SQLite's bounded quick integrity check for this role.
+        """Check readiness with a single metadata-row read.
 
         The check shares the serialized execution boundary and reports readiness
         without opening another database or exposing physical schema details.
@@ -506,10 +506,38 @@ class LocalSQLiteDatabase:
             None.
 
         Returns:
-            StorageHealth: Ready when `PRAGMA quick_check(1)` returns `ok`.
+            StorageHealth: Ready when role and schema metadata match this handle.
 
         Notes:
-            A closed database raises `StorageHealthError`.
+            A closed database raises `StorageHealthError`. Deep integrity scans
+            belong to explicit maintenance through `check_integrity`.
+        """
+        rows = await self.fetch_all(
+            "SELECT role, schema_version FROM ag_storage_meta WHERE singleton = 1"
+        )
+        ready = bool(rows and tuple(rows[0]) == (self.role.value, LOCAL_DATABASE_SCHEMA_VERSION))
+        return StorageHealth(ready=ready, detail="ready" if ready else "metadata mismatch")
+
+    async def check_integrity(self) -> StorageHealth:
+        """Scan this database for structural corruption during maintenance.
+
+        SQLite quick_check can scan the entire database even with one diagnostic
+        requested. It is deliberately excluded from request readiness checks.
+
+        Examples:
+            ```python
+            status = await database.check_integrity()
+            ```
+            ```python
+            if not (await database.check_integrity()).ready:
+                raise StorageHealthError("integrity check failed")
+            ```
+        Args:
+            None.
+        Returns:
+            StorageHealth: The first integrity diagnostic, or a ready result.
+        Notes:
+            Uses the serialized connection boundary; closed handles fail visibly.
         """
         rows = await self.fetch_all("PRAGMA quick_check(1)")
         detail = str(rows[0][0]) if rows else "no result"
