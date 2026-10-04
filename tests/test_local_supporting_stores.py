@@ -231,6 +231,93 @@ async def test_document_cas_metadata_filter_pagination_and_delete(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_document_alternatives_ranges_ordering_and_snapshot_cursor(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    store = LocalDocumentStore(database=database, clock=_Clock())
+    scope = StorageScope(project_id="project-1")
+    # Revision intervals allow later heads without changing an earlier query's body.
+    rows = [
+        ("a", "failed", "validation", "00000001", "00000002", "00000100"),
+        ("b", "rejected", "validation", "00000001", "99999999", "00000100"),
+        ("c", "failed", "execution", "00000001", "99999999", "00000900"),
+        ("d", "done", "validation", "00000002", "99999999", "00000100"),
+    ]
+    for identity, status, phase, start, end, rank in rows:
+        await store.compare_and_set(
+            scope,
+            "heads",
+            identity,
+            0,
+            {
+                "status": status,
+                "phase": phase,
+                "start": start,
+                "end": end,
+                "rank": rank,
+                "body": {"large": "x" * 10000},
+            },
+            1,
+        )
+    query = DocumentQuery(
+        scope=scope,
+        namespace="heads",
+        metadata_any={"status": ("failed", "rejected")},
+        metadata={"phase": "validation"},
+        metadata_max={"start": "00000001"},
+        metadata_min={"end": "00000002"},
+        order_by="rank",
+        descending=True,
+        page=PageRequest(limit=1),
+    )
+    first = await store.query(query)
+    assert [row.document_id for row in first.items] == ["b"]
+    second = await store.query(replace(query, page=PageRequest(limit=1, cursor=first.next_cursor)))
+    assert [row.document_id for row in second.items] == ["a"]
+    assert second.next_cursor is None
+    for changed in (
+        replace(query, descending=False),
+        replace(query, metadata_any={"status": ("failed",)}),
+        replace(query, metadata_max={"start": "00000002"}),
+        replace(query, scope=StorageScope(project_id="other")),
+    ):
+        with pytest.raises(StorageConfigurationError, match="mismatched"):
+            await store.query(replace(changed, page=PageRequest(cursor=first.next_cursor)))
+    snapshot_two = await store.query(
+        replace(query, metadata_max={"start": "00000002"}, metadata_min={"end": "00000003"})
+    )
+    assert [row.document_id for row in snapshot_two.items] == ["b"]
+    ranked = await store.query(
+        DocumentQuery(scope=scope, namespace="heads", order_by="rank", descending=True)
+    )
+    assert [row.document_id for row in ranked.items] == ["c", "d", "b", "a"]
+    resumed = await store.query(
+        DocumentQuery(
+            scope=scope,
+            namespace="heads",
+            order_by="rank",
+            descending=True,
+            page=PageRequest(cursor=ranked.item_cursors[1]),
+        )
+    )
+    assert [row.document_id for row in resumed.items] == ["b", "a"]
+    await database.close()
+
+
+def test_document_query_rejects_mutable_alternatives_and_invalid_ranges() -> None:
+    scope = StorageScope(project_id="project-1")
+    with pytest.raises(ValueError, match="immutable"):
+        DocumentQuery(scope=scope, namespace="heads", metadata_any={"state": ["failed"]})
+    with pytest.raises(ValueError, match="non-empty"):
+        DocumentQuery(scope=scope, namespace="heads", metadata_any={"state": ()})
+    with pytest.raises(TypeError, match="ordered strings"):
+        DocumentQuery(scope=scope, namespace="heads", metadata_min={"rank": 1})
+    with pytest.raises(ValueError, match="exceed"):
+        DocumentQuery(
+            scope=scope, namespace="heads", metadata_min={"rank": "z"}, metadata_max={"rank": "a"}
+        )
+
+
+@pytest.mark.asyncio
 async def test_supporting_schema_uses_canonical_identity_and_indexed_queries(
     tmp_path: Path,
 ) -> None:

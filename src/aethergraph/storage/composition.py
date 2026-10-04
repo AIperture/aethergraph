@@ -29,6 +29,7 @@ class _CompositionState(Enum):
     PREPARED = auto()
     READY = auto()
     STARTUP_FAILED = auto()
+    STARTUP_CANCELLED = auto()
     CLOSED = auto()
 
 
@@ -128,11 +129,11 @@ class StorageComposition:
             Selection or construction failure is terminal and never selects a fallback.
         """
         with self._state_lock:
+            if self._state is _CompositionState.STARTUP_CANCELLED:
+                raise StorageHealthError("Storage startup was canceled; close before disposal")
             if self._state is _CompositionState.CLOSED:
                 if self._startup_diagnostic is not None:
-                    raise StorageStartupError(self._startup_diagnostic) from (
-                        self._startup_error
-                    )
+                    raise StorageStartupError(self._startup_diagnostic) from (self._startup_error)
                 raise StorageHealthError("Storage composition is already closed")
             if self._state is _CompositionState.STARTUP_FAILED:
                 assert self._startup_diagnostic is not None
@@ -187,6 +188,8 @@ class StorageComposition:
         """
         async with self._lock:
             with self._state_lock:
+                if self._state is _CompositionState.STARTUP_CANCELLED:
+                    raise StorageHealthError("Storage startup was canceled; close before disposal")
                 if self._state is _CompositionState.READY:
                     assert self._bundle is not None
                     return self._bundle
@@ -198,9 +201,7 @@ class StorageComposition:
                     raise StorageHealthError("Storage composition is already closed")
                 if self._state is _CompositionState.STARTUP_FAILED:
                     assert self._startup_diagnostic is not None
-                    raise StorageStartupError(
-                        self._startup_diagnostic
-                    ) from self._startup_error
+                    raise StorageStartupError(self._startup_diagnostic) from self._startup_error
                 if self._state is _CompositionState.NEW:
                     raise StorageHealthError("Storage composition is not prepared")
                 assert self._bundle is not None
@@ -218,6 +219,23 @@ class StorageComposition:
                     raise StorageHealthError(
                         f"Storage provider {bundle.provider_name!r} is not ready{detail}"
                     )
+            except asyncio.CancelledError as cancellation:
+                # Cancellation is control flow, not evidence of damaged storage.
+                # Keep ownership if cleanup fails so close() can retry it.
+                with self._state_lock:
+                    self._state = _CompositionState.STARTUP_CANCELLED
+                try:
+                    await bundle.close()
+                except BaseException as cleanup_error:
+                    cancellation.add_note(
+                        "Storage cleanup remains pending: " + _safe_error_message(cleanup_error)
+                    )
+                    raise cancellation from cleanup_error
+                with self._state_lock:
+                    self._bundle = None
+                    self._request = None
+                    self._state = _CompositionState.CLOSED
+                raise
             except BaseException as startup_error:
                 diagnostic = StorageStartupDiagnostic(
                     diagnostic_id=f"storage_{uuid4().hex}",
@@ -241,6 +259,8 @@ class StorageComposition:
                     )
                     with self._state_lock:
                         self._startup_diagnostic = diagnostic
+                    if isinstance(cleanup_error, asyncio.CancelledError):
+                        raise
                     raise StorageStartupError(diagnostic) from startup_error
                 with self._state_lock:
                     self._bundle = None

@@ -27,10 +27,18 @@ class PageRequest:
 
 @dataclass(frozen=True, slots=True)
 class Page(Generic[T]):
-    """Immutable page of records and an optional opaque continuation cursor."""
+    """Immutable records and provider-owned opaque continuation anchors.
+
+    `next_cursor` means additional records existed at read time. A provider may
+    supply `resume_cursor` at the current tail for later appends. `item_cursors`
+    allow a response to stop after an item without losing the remaining page;
+    they bind the same scope, filters and ordering as the page request.
+    """
 
     items: tuple[T, ...]
     next_cursor: str | None = None
+    resume_cursor: str | None = None
+    item_cursors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.items, tuple):
@@ -39,3 +47,13 @@ class Page(Generic[T]):
             not isinstance(self.next_cursor, str) or not self.next_cursor.strip()
         ):
             raise ValueError("next_cursor must be a non-empty opaque string when supplied")
+        if self.resume_cursor is not None and (
+            not isinstance(self.resume_cursor, str) or not self.resume_cursor.strip()
+        ):
+            raise ValueError("resume_cursor must be a non-empty opaque string when supplied")
+        if not isinstance(self.item_cursors, tuple) or (
+            self.item_cursors and len(self.item_cursors) != len(self.items)
+        ):
+            raise ValueError("item_cursors must be an immutable anchor tuple matching items")
+        if any(not isinstance(value, str) or not value for value in self.item_cursors):
+            raise ValueError("item_cursors must contain non-empty opaque strings")

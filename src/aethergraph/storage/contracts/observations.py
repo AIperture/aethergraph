@@ -280,6 +280,11 @@ class ObservationQuery:
     resource_relation: ObservationResourceRelation | None = None
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
+    observation_ids: tuple[str, ...] = ()
+    include_payload_metadata: bool = True
+    error_codes: tuple[str, ...] = ()
+    duration_ms_at_least: float | None = None
+    duration_ms_at_most: float | None = None
 
     def __post_init__(self) -> None:
         for name, values in (
@@ -288,6 +293,8 @@ class ObservationQuery:
             ("producers", self.producers),
             ("statuses", self.statuses),
             ("severities", self.severities),
+            ("observation_ids", self.observation_ids),
+            ("error_codes", self.error_codes),
         ):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -297,9 +304,28 @@ class ObservationQuery:
             ("categories", self.categories),
             ("names", self.names),
             ("producers", self.producers),
+            ("observation_ids", self.observation_ids),
+            ("error_codes", self.error_codes),
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
+        if len(self.observation_ids) > 100 or len(self.error_codes) > 100:
+            raise ValueError("Exact observation selectors allow at most 100 values")
+        if type(self.include_payload_metadata) is not bool:
+            raise TypeError("include_payload_metadata must be boolean")
+        import math
+
+        for value in (self.duration_ms_at_least, self.duration_ms_at_most):
+            if value is not None and (
+                type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError("Duration bounds must be finite non-negative numbers")
+        if (
+            self.duration_ms_at_least is not None
+            and self.duration_ms_at_most is not None
+            and self.duration_ms_at_least > self.duration_ms_at_most
+        ):
+            raise ValueError("Duration bounds are reversed")
         if any(not isinstance(value, ObservationStatus) for value in self.statuses):
             raise TypeError("statuses must contain ObservationStatus values")
         if any(not isinstance(value, ObservationSeverity) for value in self.severities):
@@ -600,7 +626,14 @@ class LLMCallDetail:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LLMCallQuery:
-    """Bounded indexed LLM-call query returning metadata-only records."""
+    """Bounded indexed LLM-call query returning metadata-only records.
+
+    Exact call IDs combine with all other filters. Compact selection excludes
+    request options, inventories, previews and attempt payloads before hydration;
+    usage receipts and canonical correlation identities remain available. The
+    default preserves existing metadata pages. Neither mode retrieves captured
+    prompt or response bodies. Selection is bound into continuation cursors.
+    """
 
     scope: StorageScope
     page: PageRequest = PageRequest()
@@ -610,10 +643,15 @@ class LLMCallQuery:
     call_types: tuple[str, ...] = ()
     prompt_manifest_ids: tuple[str, ...] = ()
     statuses: tuple[ObservationStatus, ...] = ()
+    llm_call_ids: tuple[str, ...] = ()
+    call_names: tuple[str, ...] = ()
+    include_payload_metadata: bool = True
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.include_payload_metadata, bool):
+            raise TypeError("include_payload_metadata must be a boolean")
         _optional_nonempty("trace_id", self.trace_id)
         for name, values in (
             ("providers", self.providers),
@@ -621,6 +659,8 @@ class LLMCallQuery:
             ("call_types", self.call_types),
             ("prompt_manifest_ids", self.prompt_manifest_ids),
             ("statuses", self.statuses),
+            ("llm_call_ids", self.llm_call_ids),
+            ("call_names", self.call_names),
         ):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -631,9 +671,14 @@ class LLMCallQuery:
             ("models", self.models),
             ("call_types", self.call_types),
             ("prompt_manifest_ids", self.prompt_manifest_ids),
+            ("call_names", self.call_names),
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
+        if len(self.llm_call_ids) > 100 or any(
+            not isinstance(value, str) or not value.strip() for value in self.llm_call_ids
+        ):
+            raise ValueError("llm_call_ids must contain at most 100 non-empty strings")
         if any(not isinstance(value, ObservationStatus) for value in self.statuses):
             raise TypeError("statuses must contain ObservationStatus values")
         for name in ("occurred_at_or_after", "occurred_at_or_before"):
@@ -1214,6 +1259,41 @@ class ObservationRepository(Protocol):
         """
         ...
 
+    async def read_llm_content_chunk(
+        self,
+        scope: StorageScope,
+        llm_call_id: str,
+        *,
+        section: str,
+        offset: int = 0,
+        limit: int = 4096,
+        entry_index: int | None = None,
+    ) -> Mapping[str, FrozenJson] | None:
+        """Read one selected captured section as bounded canonical JSON text.
+
+        Examples:
+            ```python
+            chunk = await observations.read_llm_content_chunk(scope, "call-1", section="response")
+            ```
+            ```python
+            chunk = await observations.read_llm_content_chunk(scope, "call-1", section="request", entry_index=3)
+            ```
+        Args:
+            scope: Populated exact owner scope.
+            llm_call_id: Exact stable call identity.
+            section: Request, response, trace, tool_surface or attempt.
+            offset: Zero-based Unicode character offset in serialized JSON text.
+            limit: Maximum source characters from one through 16384.
+            entry_index: Request-message index or one-based attempt number.
+        Returns:
+            Mapping | None: Identity, capture availability, source revision and bounded
+                text; absent owners return None. Uncaptured sections remain explicit.
+        Notes:
+            Only the selected section is hydrated. JSON text can span several chunks;
+            callers concatenate it before parsing. Existing full detail is unchanged.
+        """
+        ...
+
     async def query_llm_calls(self, query: LLMCallQuery) -> Page[LLMCallRecord]:
         """Query bounded metadata-only LLM records using promoted indexes.
 
@@ -1459,6 +1539,28 @@ class ObservationRepository(Protocol):
         Notes:
             Missing policy remains absent; providers do not synthesize inherited or
             default management records.
+        """
+        ...
+
+    async def scope_management_revision(self, scope: StorageScope) -> str:
+        """Return an opaque visibility revision for cache invalidation.
+
+        Intro:
+            Provides a generic visibility fence for disposable derived caches.
+
+        Examples:
+            ```python
+            token = await observations.scope_management_revision(scope)
+            ```
+            ```python
+            changed = token != await observations.scope_management_revision(scope)
+            ```
+        Args:
+            scope: Canonical owner scope constraining management records.
+        Returns:
+            str: Opaque token changing on each management mutation within scope.
+        Notes:
+            No record bodies or identifiers are returned. This grants no access.
         """
         ...
 

@@ -241,7 +241,8 @@ class LocalSQLiteDatabase:
                 raise StorageFormatError(
                     f"Read-only local database is missing schema component {name!r}"
                 )
-            self._connection.execute("BEGIN IMMEDIATE")
+            nested = self._connection.in_transaction
+            self._connection.execute("SAVEPOINT component_install" if nested else "BEGIN IMMEDIATE")
             try:
                 for statement in statements:
                     self._connection.execute(statement)
@@ -250,9 +251,16 @@ class LocalSQLiteDatabase:
                     (name, version),
                 )
             except BaseException:
-                self._connection.rollback()
+                if nested:
+                    self._connection.execute("ROLLBACK TO component_install")
+                    self._connection.execute("RELEASE component_install")
+                else:
+                    self._connection.rollback()
                 raise
-            self._connection.commit()
+            if nested:
+                self._connection.execute("RELEASE component_install")
+            else:
+                self._connection.commit()
         except sqlite3.Error as exc:
             raise _classify_sqlite_error(exc, self.role) from exc
 
@@ -326,7 +334,10 @@ class LocalSQLiteDatabase:
                 f"from {from_version} to {to_version}"
             )
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            nested = self._connection.in_transaction
+            self._connection.execute(
+                "SAVEPOINT component_migration" if nested else "BEGIN IMMEDIATE"
+            )
             try:
                 for statement in statements:
                     self._connection.execute(statement)
@@ -335,9 +346,16 @@ class LocalSQLiteDatabase:
                     (to_version, name, from_version),
                 )
             except BaseException:
-                self._connection.rollback()
+                if nested:
+                    self._connection.execute("ROLLBACK TO component_migration")
+                    self._connection.execute("RELEASE component_migration")
+                else:
+                    self._connection.rollback()
                 raise
-            self._connection.commit()
+            if nested:
+                self._connection.execute("RELEASE component_migration")
+            else:
+                self._connection.commit()
         except sqlite3.Error as exc:
             raise _classify_sqlite_error(exc, self.role) from exc
         return True
@@ -467,7 +485,7 @@ class LocalSQLiteDatabase:
         return await self._run(transactional)
 
     async def health(self) -> StorageHealth:
-        """Run SQLite's bounded quick integrity check for this role.
+        """Check readiness with a single metadata-row read.
 
         The check shares the serialized execution boundary and reports readiness
         without opening another database or exposing physical schema details.
@@ -488,10 +506,38 @@ class LocalSQLiteDatabase:
             None.
 
         Returns:
-            StorageHealth: Ready when `PRAGMA quick_check(1)` returns `ok`.
+            StorageHealth: Ready when role and schema metadata match this handle.
 
         Notes:
-            A closed database raises `StorageHealthError`.
+            A closed database raises `StorageHealthError`. Deep integrity scans
+            belong to explicit maintenance through `check_integrity`.
+        """
+        rows = await self.fetch_all(
+            "SELECT role, schema_version FROM ag_storage_meta WHERE singleton = 1"
+        )
+        ready = bool(rows and tuple(rows[0]) == (self.role.value, LOCAL_DATABASE_SCHEMA_VERSION))
+        return StorageHealth(ready=ready, detail="ready" if ready else "metadata mismatch")
+
+    async def check_integrity(self) -> StorageHealth:
+        """Scan this database for structural corruption during maintenance.
+
+        SQLite quick_check can scan the entire database even with one diagnostic
+        requested. It is deliberately excluded from request readiness checks.
+
+        Examples:
+            ```python
+            status = await database.check_integrity()
+            ```
+            ```python
+            if not (await database.check_integrity()).ready:
+                raise StorageHealthError("integrity check failed")
+            ```
+        Args:
+            None.
+        Returns:
+            StorageHealth: The first integrity diagnostic, or a ready result.
+        Notes:
+            Uses the serialized connection boundary; closed handles fail visibly.
         """
         rows = await self.fetch_all("PRAGMA quick_check(1)")
         detail = str(rows[0][0]) if rows else "no result"
@@ -560,8 +606,12 @@ class LocalSQLiteDatabase:
         async with self._lock:
             if self._closed:
                 return
-            self._closed = True
-            await asyncio.to_thread(self._connection.close)
+
+            def close_connection(connection: sqlite3.Connection) -> None:
+                connection.close()
+                self._closed = True
+
+            await self._run_thread(close_connection)
 
     def _close_during_open_failure(self) -> None:
         if self._closed:
@@ -574,9 +624,29 @@ class LocalSQLiteDatabase:
             if self._closed:
                 raise StorageHealthError(f"Local {self.role.value} database is closed")
             try:
-                return await asyncio.to_thread(operation, self._connection)
+                return await self._run_thread(operation)
             except sqlite3.Error as exc:
                 raise _classify_sqlite_error(exc, self.role) from exc
+
+    async def _run_thread(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        # The caller holds _lock. Cancellation cannot stop a native SQLite call;
+        # retain that lock until the thread settles before propagating cancellation.
+        task = asyncio.create_task(asyncio.to_thread(operation, self._connection))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled() and task.exception() is not None:
+                cancellation.add_note(
+                    f"SQLite operation settled with {type(task.exception()).__name__}"
+                )
+            raise cancellation
 
 
 def _connect(path: Path, mode: StorageOpenMode, busy_timeout_ms: int) -> sqlite3.Connection:

@@ -43,6 +43,7 @@ from ...contracts import (
     StorageConfigurationError,
     StorageConflictError,
     StorageIntegrityError,
+    StorageMigrationRequiredError,
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
@@ -305,6 +306,17 @@ class LocalObservationRepository:
         _install(database)
         self._database = database
         self._mode = database.mode
+        if self._mode is not StorageOpenMode.READ_ONLY:
+            database.install_component(
+                name="observation_compact_indexes",
+                version=1,
+                statements=(
+                    "CREATE INDEX ix_local_observations_duration ON local_observations"
+                    "(run_id, json_extract(attributes_json, '$.duration_ms'), occurred_at DESC, sequence DESC)",
+                    "CREATE INDEX ix_local_observations_code ON local_observations"
+                    "(run_id, json_extract(attributes_json, '$.error.code'), occurred_at DESC, sequence DESC)",
+                ),
+            )
 
     async def append_many(
         self, observations: tuple[ObservationDraft, ...]
@@ -412,6 +424,37 @@ class LocalObservationRepository:
             The cursor is bound to every query filter and the requested page size.
         """
         clauses, values = _scope_filters(query.scope, alias="o")
+        if query.observation_ids:
+            clauses.append(f"o.observation_id IN ({','.join('?' for _ in query.observation_ids)})")
+            values.extend(query.observation_ids)
+        indexed_by = ""
+        if (
+            query.error_codes
+            or query.duration_ms_at_least is not None
+            or query.duration_ms_at_most is not None
+        ):
+            components = await self._database.fetch_all(
+                "SELECT version FROM ag_storage_components WHERE name = ?",
+                ("observation_compact_indexes",),
+            )
+            if not components or components[0]["version"] != 1:
+                raise StorageMigrationRequiredError(
+                    "Prepare observation compact indexes with a writable workspace"
+                )
+            indexed_by = " INDEXED BY ix_local_observations_code"
+            if query.error_codes:
+                clauses.append(
+                    f"json_extract(o.attributes_json, '$.error.code') IN ({','.join('?' for _ in query.error_codes)})"
+                )
+                values.extend(query.error_codes)
+            for bound, operator in (
+                (query.duration_ms_at_least, ">="),
+                (query.duration_ms_at_most, "<="),
+            ):
+                if bound is not None:
+                    indexed_by = " INDEXED BY ix_local_observations_duration"
+                    clauses.append(f"json_extract(o.attributes_json, '$.duration_ms') {operator} ?")
+                    values.append(bound)
         if query.categories:
             clauses.append(f"o.category IN ({','.join('?' for _ in query.categories)})")
             values.extend(query.categories)
@@ -454,14 +497,27 @@ class LocalObservationRepository:
             values.extend((timestamp, sequence))
 
         def read(connection: sqlite3.Connection) -> Page[ObservationRecord]:
+            selection = "o.*"
+            if not query.include_payload_metadata:
+                selection = _compact_observation_columns() + (
+                    ", json_object('duration_ms', "
+                    "CASE WHEN json_type(o.attributes_json, '$.duration_ms') IN ('integer', 'real') "
+                    "THEN json_extract(o.attributes_json, '$.duration_ms') END, 'error_code', "
+                    "CASE WHEN json_type(o.attributes_json, '$.error.code') = 'text' "
+                    "THEN substr(json_extract(o.attributes_json, '$.error.code'), 1, 129) END) AS attributes_json"
+                )
             rows = connection.execute(
-                "SELECT o.* FROM local_observations o "
+                f"SELECT {selection} FROM local_observations AS o{indexed_by} "
                 f"WHERE {' AND '.join(clauses)} "
                 "ORDER BY o.occurred_at DESC, o.sequence DESC LIMIT ?",
                 (*values, query.page.limit + 1),
             ).fetchall()
             visible = rows[: query.page.limit]
-            records = _load_observations(connection, visible)
+            records = (
+                _load_observations(connection, visible)
+                if query.include_payload_metadata
+                else tuple(_observation(row, ()) for row in visible)
+            )
             next_cursor = None
             if len(rows) > query.page.limit:
                 anchor = visible[-1]
@@ -470,7 +526,14 @@ class LocalObservationRepository:
                     str(anchor["occurred_at"]),
                     int(anchor["sequence"]),
                 )
-            return Page(items=records, next_cursor=next_cursor)
+            return Page(
+                items=records,
+                next_cursor=next_cursor,
+                item_cursors=tuple(
+                    _encode_cursor(fingerprint, str(row["occurred_at"]), int(row["sequence"]))
+                    for row in visible
+                ),
+            )
 
         return await self._database.read_transaction(read)
 
@@ -763,6 +826,137 @@ class LocalObservationRepository:
 
         return await self._database.read_transaction(read)
 
+    async def read_llm_content_chunk(
+        self,
+        scope: StorageScope,
+        llm_call_id: str,
+        *,
+        section: str,
+        offset: int = 0,
+        limit: int = 4096,
+        entry_index: int | None = None,
+    ) -> Mapping[str, Any] | None:
+        """Select one policy-retained call section before bounded text hydration.
+
+        Examples:
+            ```python
+            chunk = await repository.read_llm_content_chunk(scope, "call-1", section="response")
+            ```
+            ```python
+            chunk = await repository.read_llm_content_chunk(scope, "call-1", section="request", entry_index=0)
+            ```
+        Args:
+            scope: Exact populated observation owner scope.
+            llm_call_id: Exact canonical call.
+            section: Request, response, trace, tool_surface or attempt.
+            offset: Unicode character offset in selected JSON text.
+            limit: Maximum characters from one through 16384.
+            entry_index: Zero-based message or one-based transport attempt.
+        Returns:
+            Mapping | None: Bounded selected text and explicit capture metadata.
+        Notes:
+            No full detail, unrelated fragment, inventory or attempt list is loaded.
+        """
+        _nonempty("llm_call_id", llm_call_id)
+        if section not in {"request", "response", "trace", "tool_surface", "attempt"}:
+            raise ValueError("Unknown captured section")
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 16384
+        ):
+            raise ValueError("Invalid content chunk bounds")
+        if entry_index is not None and (
+            type(entry_index) is not int or entry_index < 0 or section not in {"request", "attempt"}
+        ):
+            raise ValueError("Entry selection requires a request or attempt")
+        if section == "attempt" and (entry_index is None or entry_index < 1):
+            raise ValueError("Attempt content requires an exact one-based attempt number")
+        clauses, values = _scope_filters(scope, alias="o")
+
+        def read(connection):
+            row = connection.execute(
+                "SELECT l.capture_mode, l.prompt_manifest_id, l.response_fragment_id, l.content_digest "
+                "FROM local_llm_calls l JOIN local_observations o ON o.observation_id=l.observation_id "
+                "WHERE l.llm_call_id=? AND " + " AND ".join(clauses),
+                (llm_call_id, *values),
+            ).fetchone()
+            if row is None:
+                return None
+            metadata = {
+                "llm_call_id": llm_call_id,
+                "section": section,
+                "entry_index": entry_index,
+                "capture_mode": row["capture_mode"],
+                "offset": offset,
+                "content_revision": row["content_digest"],
+                "available": False,
+                "text": "",
+                "char_count": 0,
+                "has_more": False,
+                "next_offset": offset,
+                "encoding": "canonical_json_text",
+                "integrity": "partial_content_not_rehashed",
+            }
+            params = []
+            if section in {"request", "response", "trace"}:
+                if row["capture_mode"] not in {"manifest", "full"}:
+                    return {**metadata, "unavailable_reason": "capture_policy"}
+                fragment = row["response_fragment_id"]
+                if section != "response":
+                    manifest = connection.execute(
+                        "SELECT request_fragment_id, trace_fragment_id FROM local_observation_manifests WHERE manifest_id=?",
+                        (row["prompt_manifest_id"],),
+                    ).fetchone()
+                    if manifest is None:
+                        raise StorageIntegrityError("Selected prompt manifest is missing")
+                    fragment = manifest[
+                        "request_fragment_id" if section == "request" else "trace_fragment_id"
+                    ]
+                if fragment is None:
+                    return {**metadata, "unavailable_reason": "not_retained"}
+                source = (
+                    "SELECT body_json AS body FROM local_observation_fragments WHERE fragment_id=?"
+                )
+                params = [fragment]
+                if entry_index is not None:
+                    source = "SELECT json_quote(json_extract(body_json, ?)) AS body FROM local_observation_fragments WHERE fragment_id=?"
+                    params = [f"$.messages[{entry_index}]", fragment]
+                metadata["content_revision"] = str(fragment)
+            elif section == "tool_surface":
+                source = "SELECT json_quote(json_extract(request_options_json, ?)) AS body FROM local_llm_calls WHERE llm_call_id=?"
+                params = [f'$."{_LLM_TYPED_OBSERVATION_KEY}".tool_surface', llm_call_id]
+            else:
+                source = "SELECT json_object('attempt_number', attempt_number, 'elapsed_ms', elapsed_ms, 'outcome', outcome, 'retryable', retryable, 'status_code', status_code, 'error_code', error_code, 'request_id', request_id, 'provider_delay_ms', provider_delay_ms, 'scheduled_delay_ms', scheduled_delay_ms, 'rate_limits', json(rate_limits_json)) AS body FROM local_llm_attempts WHERE llm_call_id=? AND attempt_number=?"
+                params = [llm_call_id, entry_index]
+            content = connection.execute(
+                "SELECT substr(body, ?, ?) AS text, length(body) AS char_count, body='null' AS absent FROM ("
+                + source
+                + ")",
+                (offset + 1, limit, *params),
+            ).fetchone()
+            if content is None:
+                if section in {"request", "response", "trace"}:
+                    raise StorageIntegrityError("Selected captured fragment is missing")
+                return {**metadata, "unavailable_reason": "not_retained"}
+            if content["absent"]:
+                return {**metadata, "unavailable_reason": "entry_not_retained"}
+            total = int(content["char_count"])
+            if offset > total:
+                raise ValueError("Content offset is outside the selected section")
+            text = str(content["text"])
+            return {
+                **metadata,
+                "available": True,
+                "text": text,
+                "char_count": total,
+                "next_offset": offset + len(text),
+                "has_more": offset + len(text) < total,
+            }
+
+        return await self._database.read_transaction(read)
+
     async def query_llm_calls(self, query: LLMCallQuery) -> Page[LLMCallRecord]:
         """Query a bounded metadata-only page through promoted LLM indexes.
 
@@ -795,8 +989,10 @@ class LocalObservationRepository:
             values.append(query.trace_id)
         for column, selected in (
             ("provider", query.providers),
+            ("llm_call_id", query.llm_call_ids),
             ("model", query.models),
             ("call_type", query.call_types),
+            ("call_name", query.call_names),
             ("prompt_manifest_id", query.prompt_manifest_ids),
         ):
             if selected:
@@ -818,8 +1014,33 @@ class LocalObservationRepository:
             values.extend((timestamp, sequence))
 
         def read(connection: sqlite3.Connection) -> Page[LLMCallRecord]:
+            selected_columns = "l.*"
+            if not query.include_payload_metadata:
+                selected_columns = (
+                    ",".join(
+                        "l." + name
+                        for name in (
+                            "llm_call_id",
+                            "observation_id",
+                            "call_type",
+                            "provider",
+                            "model",
+                            "capture_mode",
+                            "lifecycle_status",
+                            "profile_name",
+                            "call_name",
+                            "usage_json",
+                            "latency_ms",
+                            "error_type",
+                            "error_message",
+                            "prompt_manifest_id",
+                            "schema_version",
+                        )
+                    )
+                    + ", '{}' AS request_options_json, 'null' AS request_preview_json, 'null' AS response_preview_json, 'null' AS trace_payload_preview_json"
+                )
             rows = connection.execute(
-                "SELECT l.*, o.occurred_at AS page_occurred_at, "
+                f"SELECT {selected_columns}, o.occurred_at AS page_occurred_at, "
                 "o.sequence AS page_sequence "
                 "FROM local_llm_calls l JOIN local_observations o "
                 "ON o.observation_id = l.observation_id "
@@ -828,7 +1049,9 @@ class LocalObservationRepository:
                 (*values, query.page.limit + 1),
             ).fetchall()
             visible = rows[: query.page.limit]
-            records = _load_llm_records(connection, visible)
+            records = _load_llm_records(
+                connection, visible, include_attempts=query.include_payload_metadata
+            )
             next_cursor = None
             if len(rows) > query.page.limit:
                 anchor = visible[-1]
@@ -837,7 +1060,16 @@ class LocalObservationRepository:
                     str(anchor["page_occurred_at"]),
                     int(anchor["page_sequence"]),
                 )
-            return Page(items=records, next_cursor=next_cursor)
+            return Page(
+                items=records,
+                next_cursor=next_cursor,
+                item_cursors=tuple(
+                    _encode_cursor(
+                        fingerprint, str(row["page_occurred_at"]), int(row["page_sequence"])
+                    )
+                    for row in visible
+                ),
+            )
 
         return await self._database.read_transaction(read)
 
@@ -1107,6 +1339,36 @@ class LocalObservationRepository:
 
         return await self._database.read_transaction(read)
 
+    async def scope_management_revision(self, scope: StorageScope) -> str:
+        """Aggregate scoped monotonic policy revisions without row hydration.
+
+        Intro:
+            Uses canonical management revisions without a provider schema change.
+
+        Examples:
+            ```python
+            token = await repository.scope_management_revision(scope)
+            ```
+            ```python
+            assert token == await repository.scope_management_revision(scope)
+            ```
+        Args:
+            scope: Canonical scope constraining the management aggregate.
+        Returns:
+            str: Count and revision-sum token for visibility cache invalidation.
+        Notes:
+            Canonical management CAS increments revisions and retains policy rows.
+            SQL returns one aggregate; management bodies are never deserialized.
+        """
+        clauses, values = _management_scope_filters(scope, alias="m")
+        where = " AND ".join(clauses) if clauses else "1 = 1"
+        rows = await self._database.fetch_all(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(m.revision), 0) AS revision "
+            "FROM local_observation_scope_management m WHERE " + where,
+            tuple(values),
+        )
+        return f"{rows[0]['count']}:{rows[0]['revision']}"
+
     async def get_scope_management(
         self, scope: StorageScope, scope_key: str
     ) -> ObservationScopeManagementRecord | None:
@@ -1370,6 +1632,35 @@ def _load_observation(connection: sqlite3.Connection, row: sqlite3.Row) -> Obser
     return _observation(row, tuple(_resource_link(link) for link in links))
 
 
+def _compact_observation_columns() -> str:
+    return (
+        ", ".join(
+            "o." + column
+            for column in (
+                "sequence",
+                "observation_id",
+                *_SCOPE_COLUMNS,
+                "category",
+                "name",
+                "occurred_at",
+                "status",
+                "severity",
+                "producer",
+                "trace_id",
+                "turn_id",
+                "parent_observation_id",
+                "caused_by_observation_id",
+                "source_event_id",
+                "payload_fragment_id",
+                "retention_class",
+                "expires_at",
+                "schema_version",
+            )
+        )
+        + ", substr(o.summary, 1, 201) AS summary"
+    )
+
+
 def _load_observations(
     connection: sqlite3.Connection,
     rows: Sequence[sqlite3.Row],
@@ -1618,6 +1909,8 @@ def _load_llm_record(connection: sqlite3.Connection, row: sqlite3.Row) -> LLMCal
 def _load_llm_records(
     connection: sqlite3.Connection,
     rows: Sequence[sqlite3.Row],
+    *,
+    include_attempts: bool = True,
 ) -> tuple[LLMCallRecord, ...]:
     if not rows:
         return ()
@@ -1626,20 +1919,33 @@ def _load_llm_records(
     observation_placeholders = ",".join("?" for _ in observation_ids)
     call_placeholders = ",".join("?" for _ in call_ids)
     observation_rows = connection.execute(
-        "SELECT * FROM local_observations WHERE observation_id IN ("
+        "SELECT "
+        + (
+            "o.*"
+            if include_attempts
+            else _compact_observation_columns() + ", '{}' AS attributes_json"
+        )
+        + " FROM local_observations o WHERE observation_id IN ("
         + observation_placeholders
         + ")",
         observation_ids,
     ).fetchall()
-    observations = {
-        record.observation_id: record for record in _load_observations(connection, observation_rows)
-    }
-    attempt_rows = connection.execute(
-        "SELECT * FROM local_llm_attempts WHERE llm_call_id IN ("
-        + call_placeholders
-        + ") ORDER BY llm_call_id, attempt_number",
-        call_ids,
-    ).fetchall()
+    selected = (
+        _load_observations(connection, observation_rows)
+        if include_attempts
+        else tuple(_observation(row, ()) for row in observation_rows)
+    )
+    observations = {record.observation_id: record for record in selected}
+    attempt_rows = (
+        connection.execute(
+            "SELECT * FROM local_llm_attempts WHERE llm_call_id IN ("
+            + call_placeholders
+            + ") ORDER BY llm_call_id, attempt_number",
+            call_ids,
+        ).fetchall()
+        if include_attempts
+        else ()
+    )
     attempts = _attempts_by_call(attempt_rows)
     try:
         return tuple(
@@ -2691,6 +2997,19 @@ def _observation_cursor(sequence: int) -> str:
 def _observation_query_fingerprint(query: ObservationQuery) -> str:
     payload = {
         "kind": "observations",
+        **({"observation_ids": list(query.observation_ids)} if query.observation_ids else {}),
+        **({"include_payload_metadata": False} if not query.include_payload_metadata else {}),
+        **({"error_codes": list(query.error_codes)} if query.error_codes else {}),
+        **(
+            {"duration_ms_at_least": query.duration_ms_at_least}
+            if query.duration_ms_at_least is not None
+            else {}
+        ),
+        **(
+            {"duration_ms_at_most": query.duration_ms_at_most}
+            if query.duration_ms_at_most is not None
+            else {}
+        ),
         "scope": query.scope.as_filter(),
         "categories": list(query.categories),
         "names": list(query.names),
@@ -2713,6 +3032,9 @@ def _observation_query_fingerprint(query: ObservationQuery) -> str:
 def _llm_query_fingerprint(query: LLMCallQuery) -> str:
     payload = {
         "kind": "llm-calls",
+        **({"include_payload_metadata": False} if not query.include_payload_metadata else {}),
+        **({"llm_call_ids": list(query.llm_call_ids)} if query.llm_call_ids else {}),
+        **({"call_names": list(query.call_names)} if query.call_names else {}),
         "scope": query.scope.as_filter(),
         "trace_id": query.trace_id,
         "providers": list(query.providers),

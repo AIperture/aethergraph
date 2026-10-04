@@ -3745,3 +3745,53 @@ async def test_anthropic_null_compaction_fails_visibly() -> None:
         )
 
     assert raised.value.code == "server_context_compaction_failed"
+
+
+@pytest.mark.asyncio
+async def test_malformed_arguments_preserve_completed_provider_facts_without_payload():
+    finished = []
+
+    class Sink:
+        async def begin_llm_call(self, record, **kwargs):
+            pass
+
+        async def finish_llm_call(self, record, **kwargs):
+            finished.append(record)
+
+    payload = {
+        "id": "malformed-response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call",
+                "name": "lookup",
+                "arguments": '{"key": "private',
+            }
+        ],
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+    }
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        api_key="test",
+        observation_sink=Sink(),
+        observation_capture_mode="full",
+    )
+    client._client = _FakeHttpClient(payload)
+    client._bound_loop = asyncio.get_running_loop()
+    request = ModelRequest(
+        messages=(message_from_text("user", "Choose a Tool."),),
+        tools=_native_tool_request(max_calls=1).tools,
+        tool_choice="required",
+    )
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        await client.generate(request)
+    assert raised.value.code == "invalid_arguments"
+    facts = json.loads(finished[0].raw_text)
+    assert facts["status"] == "completed"
+    assert facts["incomplete_reason"] == ""
+    assert facts["response_id"] == "malformed-response"
+    assert facts["tool_arguments"][0]["argument_chars"] == 16
+    assert "private" not in finished[0].raw_text
+    assert finished[0].usage

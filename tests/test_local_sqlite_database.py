@@ -9,6 +9,7 @@ import pytest
 from aethergraph.storage.contracts import (
     StorageFormatError,
     StorageHealthError,
+    StorageIntegrityError,
     StorageOpenMode,
     StorageReadOnlyError,
 )
@@ -53,6 +54,30 @@ async def test_each_role_uses_central_policy_and_exact_schema_metadata(
     await database.close()
     with pytest.raises(StorageHealthError, match="closed"):
         await database.health()
+
+
+@pytest.mark.asyncio
+async def test_readiness_does_not_scan_and_integrity_remains_explicit(tmp_path: Path) -> None:
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    from unittest.mock import patch
+
+    try:
+        with patch.object(LocalSQLiteDatabase, "fetch_all", wraps=database.fetch_all) as reads:
+            assert (await database.health()).ready
+            assert all("quick_check" not in call.args[0] for call in reads.call_args_list)
+            assert (await database.check_integrity()).ready
+            assert reads.call_args.args == ("PRAGMA quick_check(1)",)
+        await database.execute("UPDATE ag_storage_meta SET schema_version = -1")
+        assert not (await database.health()).ready
+        await database.execute("DROP TABLE ag_storage_meta")
+        with pytest.raises(StorageIntegrityError):
+            await database.health()
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

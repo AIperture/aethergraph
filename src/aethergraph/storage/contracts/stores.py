@@ -65,8 +65,15 @@ class EventQuery:
     occurred_at_min: datetime | None = None
     occurred_at_max: datetime | None = None
     order: SortDirection = SortDirection.DESCENDING
+    payload_byte_budget: int | None = None
 
     def __post_init__(self) -> None:
+        if self.payload_byte_budget is not None and (
+            isinstance(self.payload_byte_budget, bool)
+            or not isinstance(self.payload_byte_budget, int)
+            or not 1024 <= self.payload_byte_budget <= 16 * 1024 * 1024
+        ):
+            raise ValueError("payload_byte_budget must be between 1024 and 16777216")
         for name, values in (("kinds", self.kinds), ("tags", self.tags)):
             if not isinstance(values, tuple):
                 raise TypeError(f"{name} must be an immutable tuple")
@@ -394,6 +401,43 @@ class EventStore(Protocol):
 
         Notes:
             Numeric provider cursors are not aliases for event identifiers.
+        """
+        ...
+
+    async def read_payload_chunk(
+        self,
+        scope: StorageScope,
+        event_id: str,
+        *,
+        json_path: str,
+        offset: int = 0,
+        limit: int = 4096,
+        match_key: str | None = None,
+        match_value: str | None = None,
+    ) -> Mapping[str, FrozenJson] | None:
+        """Read bounded serialized JSON from one exact immutable Event payload.
+
+        Examples:
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.summary")
+            ```
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.steps", match_key="id", match_value="step-1")
+            ```
+        Args:
+            scope: Populated exact owner and execution constraints.
+            event_id: Immutable stream-unique identity.
+            json_path: Explicit simple object/array path in the canonical payload.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            match_key: Optional simple key selecting one array object.
+            match_value: Exact string identity; requires match_key.
+        Returns:
+            Mapping | None: Fixed Event header, selected text and continuation facts;
+                absent owner returns None and absent section is explicit.
+        Notes:
+            Array identities must be unique. No unselected content is hydrated.
+            Concatenate text chunks before parsing; Event immutability pins content.
         """
         ...
 

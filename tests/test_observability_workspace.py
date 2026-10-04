@@ -41,6 +41,46 @@ NOW = datetime(2026, 8, 16, 20, tzinfo=UTC)
 OWNER = StorageScope(project_id="project-1")
 
 
+@pytest.mark.asyncio
+async def test_visibility_revision_is_scoped_and_changes_without_policy_hydration(
+    tmp_path, monkeypatch
+):
+    provider, request = _provider_and_request(tmp_path)
+    bundle = provider.open(request)
+    policy = ObservationScopeManagementRecord(
+        scope_key="trace:hidden",
+        scope=OWNER,
+        revision=1,
+        updated_at=NOW,
+        trace_id="trace-1",
+        hidden=True,
+    )
+    before = await bundle.observations.scope_management_revision(OWNER)
+    await bundle.observations.compare_and_set_scope_management(policy, 0)
+    first = await bundle.observations.scope_management_revision(OWNER)
+    assert before != first
+    await bundle.observations.compare_and_set_scope_management(
+        replace(policy, revision=2, hidden=False), 1
+    )
+    assert first != await bundle.observations.scope_management_revision(OWNER)
+    assert (
+        await bundle.observations.scope_management_revision(StorageScope(project_id="foreign"))
+        == before
+    )
+    await bundle.close()
+    import aethergraph.storage.providers.local_sqlite.observation_repository as repository
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Revision query must not hydrate policy rows")
+
+    monkeypatch.setattr(repository, "_management", forbidden)
+    facade = open_observability_workspace(tmp_path)
+    try:
+        assert await facade.scope_management_revision() == "1:2"
+    finally:
+        await facade.close()
+
+
 class _Clock:
     def now(self) -> datetime:
         return NOW
@@ -336,6 +376,39 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
         "items": engine_events,
         "next_cursor": None,
     }
+    assert await facade.get_engine_event(run_id="run-1", event_id="engine-1") == engine_events[0]
+    assert await facade.get_engine_event(run_id="other", event_id="engine-1") is None
+    assert await facade.get_engine_event(run_id="run-1", event_id="missing") is None
+    assert (
+        await facade.page_engine_events(
+            run_id="run-1", kinds=("agent_engine.decision",), since=NOW, until=NOW
+        )
+    )["items"] == engine_events
+    assert (await facade.page_engine_events(run_id="run-1", kinds=("agent_engine.tool_result",)))[
+        "items"
+    ] == []
+    bound_scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+    compact_calls = await facade.page_llm_call_records(run_id="run-1", llm_call_ids=("call-1",))
+    assert compact_calls.items[0].llm_call_id == "call-1"
+    assert compact_calls.items[0].request_options == {} and not compact_calls.items[0].attempts
+    assert len(compact_calls.item_cursors) == 1
+    assert not (await facade.page_llm_call_records(run_id="run-1", models=("missing",))).items
+    assert not (await facade.page_llm_call_records(run_id="run-1", statuses=("error",))).items
+    assert (
+        await facade.page_llm_call_records(
+            run_id="run-1", providers=("openai",), since=NOW, until=NOW
+        )
+    ).items
+    with pytest.raises(ObservabilityUnavailableError):
+        await facade.page_llm_call_records(run_id="foreign", llm_call_ids=("call-1",))
+    assert bound_scope.project_id == "project-1" and bound_scope.run_id == "run-1"
+    assert await documents.get(bound_scope, "projection.test", "missing") is None
+    from aethergraph.storage.contracts import StorageReadOnlyError
+
+    with pytest.raises(StorageReadOnlyError):
+        await kv.compare_and_set(bound_scope, "projection.test", "checkpoint", 0, {})
+    with pytest.raises(ObservabilityUnavailableError):
+        await facade.supporting_stores(run_id="other")
     assert await facade.page_runs(session_id="missing-session") == {
         "items": [],
         "next_cursor": None,
@@ -380,6 +453,22 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
         "provider_request_config",
     ]
     assert (tmp_path / "workspace.json").read_text(encoding="utf-8") == manifest_before
+
+    # Writable preparation is explicit and limited to provider-owned contracts.
+    preparation = open_observability_workspace(tmp_path, writable=True)
+    try:
+        scope, documents, kv = await preparation.supporting_stores(run_id="run-1")
+        await documents.compare_and_set(scope, "projection.test", "head", 0, {"kind": "test"}, 1)
+        await kv.compare_and_set(scope, "projection.test", "checkpoint", 0, {"version": 1})
+    finally:
+        await preparation.close()
+    routine = open_observability_workspace(tmp_path)
+    try:
+        scope, documents, kv = await routine.supporting_stores(run_id="run-1")
+        assert (await documents.get(scope, "projection.test", "head")).document["kind"] == "test"
+        assert (await kv.get(scope, "projection.test", "checkpoint")).value["version"] == 1
+    finally:
+        await routine.close()
 
 
 def test_workspace_opener_rejects_unmanifested_history_without_fallback(tmp_path: Path) -> None:

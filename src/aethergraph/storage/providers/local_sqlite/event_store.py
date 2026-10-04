@@ -436,6 +436,120 @@ class LocalEventStore:
         )
         return _record(rows[0]) if rows else None
 
+    async def read_payload_chunk(
+        self,
+        scope: StorageScope,
+        event_id: str,
+        *,
+        json_path: str,
+        offset: int = 0,
+        limit: int = 4096,
+        match_key: str | None = None,
+        match_value: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        """Select one exact payload path or array identity before bounded hydration.
+
+        Examples:
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.plan")
+            ```
+            ```python
+            chunk = await store.read_payload_chunk(scope, "event-1", json_path="$.data.steps", match_key="id", match_value="step-1")
+            ```
+        Args:
+            scope: Required populated canonical scope.
+            event_id: Exact stream-unique immutable Event identity.
+            json_path: Simple object or numeric array path in its payload.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum characters from one through 16384.
+            match_key: Optional simple array-item identity key.
+            match_value: Exact string identity paired with match_key.
+        Returns:
+            Mapping | None: Fixed header, bounded text and explicit availability.
+        Notes:
+            Duplicate array identities fail visibly. Full Event records and unrelated
+            payload sections are never loaded into Python for this operation.
+        """
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("Exact Event identity is required")
+        if not isinstance(json_path, str) or not re.fullmatch(
+            r"\$(?:\.[A-Za-z_][A-Za-z_0-9]*|\[\d+\])*", json_path
+        ):
+            raise ValueError("Invalid simple payload path")
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 16384
+        ):
+            raise ValueError("Invalid payload chunk bounds")
+        if (match_key is None) != (match_value is None) or (
+            match_key is not None
+            and (
+                not isinstance(match_key, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", match_key)
+                or not isinstance(match_value, str)
+                or not match_value
+            )
+        ):
+            raise ValueError("Array selection requires an exact simple key and string value")
+        where, parameters = _scope_predicate(scope)
+
+        def read(connection):
+            header = connection.execute(
+                f"SELECT event_id, kind, tags_json, occurred_at FROM local_events WHERE stream=? AND event_id=? AND {where}",
+                (self._stream, event_id, *parameters),
+            ).fetchone()
+            if header is None:
+                return None
+            metadata = {
+                "event_id": event_id,
+                "kind": header["kind"],
+                "tags": json.loads(header["tags_json"]),
+                "occurred_at": header["occurred_at"],
+                "json_path": json_path,
+                "match_key": match_key,
+                "match_value": match_value,
+                "offset": offset,
+                "available": False,
+                "text": "",
+                "char_count": 0,
+                "next_offset": offset,
+                "has_more": False,
+                "encoding": "serialized_json_text",
+            }
+            if match_key is None:
+                source = "SELECT json_quote(json_extract(payload_json, ?)) AS body FROM local_events WHERE stream=? AND event_id=?"
+                params = (json_path, self._stream, event_id)
+            else:
+                source = "SELECT json_quote(json(item.value)) AS body FROM local_events e, json_each(e.payload_json, ?) item WHERE e.stream=? AND e.event_id=? AND CASE WHEN item.type='object' THEN json_extract(item.value, ?) END=? LIMIT 2"
+                params = (json_path, self._stream, event_id, "$." + match_key, match_value)
+            rows = connection.execute(
+                "SELECT substr(body, ?, ?) AS text, length(body) AS char_count, body='null' AS absent FROM ("
+                + source
+                + ")",
+                (offset + 1, limit, *params),
+            ).fetchall()
+            if len(rows) > 1:
+                raise StorageIntegrityError("Selected payload array identity is not unique")
+            if not rows or rows[0]["absent"]:
+                return {**metadata, "unavailable_reason": "section_not_retained"}
+            content = rows[0]
+            total = int(content["char_count"])
+            if offset > total:
+                raise ValueError("Payload offset is outside the selected section")
+            text = str(content["text"])
+            return {
+                **metadata,
+                "available": True,
+                "text": text,
+                "char_count": total,
+                "next_offset": offset + len(text),
+                "has_more": offset + len(text) < total,
+            }
+
+        return await self._database.read_transaction(read)
+
     async def get_many(
         self,
         scope: StorageScope,
@@ -550,21 +664,61 @@ class LocalEventStore:
             clauses.append(f"cursor {'>' if direction == 'ASC' else '<'} ?")
             values.append(anchor)
         values.append(query.page.limit + 1)
+        selection = "*"
+        if query.payload_byte_budget is not None:
+            columns = (
+                "payload_json",
+                "tags_json",
+                "metrics_json",
+                "text",
+                "event_id",
+                "kind",
+                "stage",
+                "topic",
+                "occurred_at",
+                *_SCOPE_FIELDS,
+            )
+            # Only sizes/cursors cross the provider boundary until a prefix fits.
+            sizes = " + ".join(
+                f"length(CAST(coalesce(json_quote({column}), '') AS BLOB))" for column in columns
+            )
+            selection = f"cursor, 1024 + {sizes} AS payload_bytes"
         rows = await self._database.fetch_all(
-            f"SELECT * FROM local_events WHERE {' AND '.join(clauses)} "
+            f"SELECT {selection} FROM local_events WHERE {' AND '.join(clauses)} "
             f"ORDER BY cursor {direction} LIMIT ?",
             values,
         )
         selected = rows[: query.page.limit]
-        next_cursor = None
-        if len(rows) > query.page.limit:
-            next_cursor = _encode_page_cursor(
+        has_more = len(rows) > query.page.limit
+        if query.payload_byte_budget is not None and selected:
+            used = 0
+            count = 0
+            for row in selected:
+                size = int(row["payload_bytes"])
+                if count and used + size > query.payload_byte_budget:
+                    break
+                used += size
+                count += 1
+            has_more = len(rows) > count
+            identities = [int(row["cursor"]) for row in selected[:count]]
+            selected = await self._database.fetch_all(
+                f"SELECT * FROM local_events WHERE cursor IN ({','.join('?' for _ in identities)}) "
+                f"ORDER BY cursor {direction}",
+                identities,
+            )
+        resume_cursor = query.page.cursor
+        if selected:
+            resume_cursor = _encode_page_cursor(
                 stream=self._stream,
                 direction=direction,
                 fingerprint=fingerprint,
                 anchor=int(selected[-1]["cursor"]),
             )
-        return Page(items=tuple(_record(row) for row in selected), next_cursor=next_cursor)
+        return Page(
+            items=tuple(_record(row) for row in selected),
+            next_cursor=resume_cursor if has_more else None,
+            resume_cursor=resume_cursor,
+        )
 
     def _append_sync(
         self,

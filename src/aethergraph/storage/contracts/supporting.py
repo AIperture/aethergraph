@@ -81,13 +81,58 @@ class KeyValueQuery:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DocumentQuery:
-    """Bounded namespace/prefix query for typed supporting documents."""
+    """Bounded namespace/prefix query for typed supporting documents.
+
+    Intro:
+        Exact and alternative values apply before pagination. Independent keys are
+        AND; alternatives within one key are OR. Range and ordering keys are strings
+        compared by canonical JSON collation, with document identity as tie-breaker.
+        Owners encode numeric metrics into fixed-width sortable strings.
+
+    Examples:
+        Select alternative states:
+        ```python
+        query = DocumentQuery(scope=scope, namespace="heads", metadata_any={
+            "status": ("failed", "rejected")
+        })
+        ```
+        Read an immutable snapshot's ordered revision keys:
+        ```python
+        query = DocumentQuery(scope=scope, namespace="heads", metadata_max={
+            "revision_key": "0000000042"
+        }, order_by="revision_key", descending=True)
+        ```
+
+    Args:
+        scope: Canonical access scope.
+        namespace: Exact document namespace.
+        page: Bounded page request and filter-bound continuation.
+        id_prefix: Optional document identity prefix.
+        metadata: Exact top-level values.
+        metadata_any: Non-empty immutable alternatives for each top-level key.
+        metadata_min: Inclusive lower bounds on ordered string metadata.
+        metadata_max: Inclusive upper bounds on ordered string metadata.
+        order_by: Optional string metadata key; absent/non-string values are excluded.
+        descending: Reverse the selected ordering and identity tie-breaker.
+
+    Returns:
+        DocumentQuery: Immutable validated query; providers filter before hydration.
+
+    Notes:
+        Authored numeric values are not lexicographic numeric rankings. Use an explicit
+        normalized order key. No product-specific classification belongs here.
+    """
 
     scope: StorageScope
     namespace: str
     page: PageRequest = PageRequest()
     id_prefix: str | None = None
     metadata: Mapping[str, FrozenJson] = field(default_factory=dict)
+    metadata_any: Mapping[str, tuple[FrozenJson, ...]] = field(default_factory=dict)
+    metadata_min: Mapping[str, str] = field(default_factory=dict)
+    metadata_max: Mapping[str, str] = field(default_factory=dict)
+    order_by: str | None = None
+    descending: bool = False
 
     def __post_init__(self) -> None:
         _nonempty("namespace", self.namespace)
@@ -98,6 +143,27 @@ class DocumentQuery:
             "metadata",
             _freeze_mapping(self.metadata, path="metadata"),
         )
+        for key, values in self.metadata_any.items():
+            _nonempty("metadata_any key", key)
+            if not isinstance(values, tuple) or not values:
+                raise ValueError("metadata_any values must be non-empty immutable tuples")
+        object.__setattr__(
+            self, "metadata_any", _freeze_mapping(self.metadata_any, path="metadata_any")
+        )
+        for name in ("metadata_min", "metadata_max"):
+            bounds = getattr(self, name)
+            for key, value in bounds.items():
+                _nonempty(f"{name} key", key)
+                if not isinstance(value, str):
+                    raise TypeError(f"{name} bounds must be ordered strings")
+            object.__setattr__(self, name, _freeze_mapping(bounds, path=name))
+        for key in self.metadata_min.keys() & self.metadata_max.keys():
+            if self.metadata_min[key] > self.metadata_max[key]:
+                raise ValueError("metadata_min must not exceed metadata_max")
+        if self.order_by is not None:
+            _nonempty("order_by", self.order_by)
+        if not isinstance(self.descending, bool):
+            raise TypeError("descending must be boolean")
 
 
 class KeyValueStore(Protocol):

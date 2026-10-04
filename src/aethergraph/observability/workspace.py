@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -34,10 +35,18 @@ from aethergraph.services.control.canonical_stores import (
 )
 from aethergraph.storage.composition import StorageComposition
 from aethergraph.storage.contracts import (
+    DocumentStore,
     EventQuery,
+    KeyValueStore,
     LLMCallQuery,
+    LLMCallRecord,
     ObservationCaptureMode,
+    ObservationQuery,
+    ObservationRecord,
     ObservationScopeManagementQuery,
+    ObservationSeverity,
+    ObservationStatus,
+    Page,
     PageRequest,
     RunQuery,
     SortDirection,
@@ -285,6 +294,31 @@ class _CanonicalObservabilityFacade:
         """
         return await (await self._inspection()).list_agent_events(**filters)
 
+    async def scope_management_revision(self) -> str:
+        """Read an owner-bound opaque retention/visibility invalidation token.
+
+        Intro:
+            Delegates scope management revision aggregation to canonical storage.
+
+        Examples:
+            ```python
+            token = await facade.scope_management_revision()
+            ```
+            ```python
+            unchanged = token == await facade.scope_management_revision()
+            ```
+        Args:
+            None.
+        Returns:
+            str: Canonical management aggregate token without policy hydration.
+        Notes:
+            This invalidates derived caches; it does not establish authorization.
+        """
+        scope = self._query_scope()
+        if scope is None:
+            raise ObservabilityUnavailableError("Observation owner scope is unavailable")
+        return await (await self._bundle()).observations.scope_management_revision(scope)
+
     async def list_suppressed_scopes(
         self,
         *,
@@ -408,7 +442,19 @@ class _CanonicalObservabilityFacade:
         }
 
     async def page_engine_events(
-        self, *, run_id: str, limit: int = 100, cursor: str | None = None
+        self,
+        *,
+        run_id: str,
+        limit: int = 100,
+        cursor: str | None = None,
+        kinds: tuple[str, ...] = (),
+        stage: str | None = None,
+        topic: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        order: SortDirection = SortDirection.ASCENDING,
+        include_resume_cursor: bool = False,
+        payload_byte_budget: int | None = None,
     ) -> dict[str, Any]:
         """Read one exact run's canonical Engine-event page in causal storage order.
 
@@ -428,6 +474,15 @@ class _CanonicalObservabilityFacade:
             run_id: Exact canonical run identity.
             limit: Provider page size, at most 1,000.
             cursor: Opaque continuation for that run.
+            kinds: Exact canonical kinds, matched as alternatives.
+            stage: Optional exact authored stage, distinct from a lifecycle phase.
+            topic: Optional exact authored topic.
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
+            order: Provider storage ordering direction.
+            include_resume_cursor: Return a tail-safe continuation separately from next_cursor.
+            payload_byte_budget: Optional provider-side body hydration bound; one oversized
+                first item is returned explicitly rather than permanently blocking progress.
         Returns:
             dict: Stable Engine-event mappings and next_cursor.
         Notes:
@@ -442,14 +497,363 @@ class _CanonicalObservabilityFacade:
             EventQuery(
                 scope=scope,
                 tags=("agent_engine",),
-                order=SortDirection.ASCENDING,
+                kinds=kinds,
+                stage=stage,
+                topic=topic,
+                occurred_at_min=since,
+                occurred_at_max=until,
+                order=order,
+                payload_byte_budget=payload_byte_budget,
                 page=page_request,
             )
         )
-        return {
+        result = {
             "items": [_event_mapping(record) for record in page.items],
             "next_cursor": page.next_cursor,
         }
+        if include_resume_cursor:
+            result["resume_cursor"] = page.resume_cursor
+        return result
+
+    async def get_engine_event(self, *, run_id: str, event_id: str) -> dict[str, Any] | None:
+        """Read one canonical Engine event within its exact authorized physical run.
+
+        Intro:
+            Performs one scoped identity lookup without replaying a timeline.
+
+        Examples:
+            Read a recorded event:
+            ```python
+            event = await facade.get_engine_event(run_id="run-1", event_id="event-1")
+            ```
+            Reject a different run's event:
+            ```python
+            assert await facade.get_engine_event(run_id="other", event_id="event-1") is None
+            ```
+
+        Args:
+            run_id: Exact authorized physical execution identity.
+            event_id: Exact canonical event identity, without projection suffixes.
+
+        Returns:
+            dict | None: The authored envelope, or None for missing/foreign/non-Engine events.
+
+        Notes:
+            Engine owns projected identifiers and diagnostic classification.
+        """
+        scope = self._query_scope(run_id=run_id)
+        if scope is None:
+            return None
+        record = await (await self._bundle()).memory_events.get(scope, event_id)
+        if record is None or "agent_engine" not in record.tags:
+            return None
+        return _event_mapping(record)
+
+    async def page_llm_call_records(
+        self,
+        *,
+        run_id: str,
+        limit: int = 20,
+        cursor: str | None = None,
+        llm_call_ids: tuple[str, ...] = (),
+        include_payload_metadata: bool = False,
+        providers: tuple[str, ...] = (),
+        models: tuple[str, ...] = (),
+        call_types: tuple[str, ...] = (),
+        call_names: tuple[str, ...] = (),
+        statuses: tuple[str, ...] = (),
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Page[LLMCallRecord]:
+        """Read exact-run canonical LLM metadata without captured body hydration.
+
+        Intro:
+            Compact selection is performed by the provider before inventory,
+            preview, options or attempt payloads enter Python.
+        Examples:
+            ```python
+            page = await facade.page_llm_call_records(run_id="run-1")
+            ```
+            ```python
+            page = await facade.page_llm_call_records(run_id="run-1", llm_call_ids=("call-1",))
+            ```
+        Args:
+            run_id: Exact accessible physical run owning the records.
+            limit: Canonical provider page size.
+            cursor: Opaque continuation bound to scope and compact selection.
+            llm_call_ids: Optional exact identities, combined with run ownership.
+            include_payload_metadata: Explicitly include inventories/previews/attempts;
+                captured request/response bodies remain excluded in either mode.
+            providers: Exact provider alternatives.
+            models: Exact model alternatives.
+            call_types: Exact logical call-type alternatives.
+            call_names: Exact recorded call-name alternatives.
+            statuses: Exact canonical observation statuses (ok/error/pending/unknown).
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
+        Returns:
+            Page: Native generic record metadata and per-item pagination anchors.
+        Notes:
+            Suppressed or absent owners fail visibly. Usage remains the provider's
+            receipt; consumers own normalization and product scope presentation.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("LLM metadata owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("LLM metadata owner is unavailable")
+        bundle = await self._bundle()
+        page = await bundle.observations.query_llm_calls(
+            LLMCallQuery(
+                scope=scope,
+                page=PageRequest(limit=limit, cursor=cursor),
+                llm_call_ids=llm_call_ids,
+                include_payload_metadata=include_payload_metadata,
+                providers=providers,
+                models=models,
+                call_types=call_types,
+                call_names=call_names,
+                statuses=tuple(ObservationStatus(value) for value in statuses),
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+            )
+        )
+        if any(record.observation.trace_id in hidden["trace_id"] for record in page.items):
+            raise ObservabilityUnavailableError("Selected LLM metadata is suppressed")
+        return page
+
+    async def page_observation_records(
+        self,
+        *,
+        run_id: str,
+        categories: tuple[str, ...],
+        limit: int = 20,
+        cursor: str | None = None,
+        observation_ids: tuple[str, ...] = (),
+        names: tuple[str, ...] = (),
+        producers: tuple[str, ...] = (),
+        statuses: tuple[str, ...] = (),
+        severities: tuple[str, ...] = (),
+        error_codes: tuple[str, ...] = (),
+        duration_ms_at_least: float | None = None,
+        duration_ms_at_most: float | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Page[ObservationRecord]:
+        """Read compact canonical observations from one accessible physical run.
+
+        Intro:
+            The provider excludes attributes and resource inventories before hydration.
+        Examples:
+            ```python
+            page = await facade.page_observation_records(run_id="run-1", categories=("log",))
+            ```
+            ```python
+            page = await facade.page_observation_records(run_id="run-1", categories=("trace",), observation_ids=("span-1",))
+            ```
+        Args:
+            run_id: Exact accessible owner.
+            categories: Canonical category alternatives.
+            limit: Maximum metadata rows.
+            cursor: Native scope and selection bound continuation.
+            observation_ids: Exact identities belonging to this owner.
+            names: Exact observation names.
+            producers: Exact producer alternatives.
+            statuses: Canonical status alternatives.
+            severities: Canonical severity alternatives.
+            error_codes: Exact recorded error codes.
+            duration_ms_at_least: Inclusive numeric duration lower bound.
+            duration_ms_at_most: Inclusive numeric duration upper bound.
+            since: Inclusive UTC occurrence lower bound.
+            until: Inclusive UTC occurrence upper bound.
+        Returns:
+            Page: Compact metadata with exact per-row anchors.
+        Notes:
+            Only duration and a bounded error code remain in attributes. Older
+            workspaces require writable preparation for indexed scalar predicates.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("Observation owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("Observation owner is unavailable")
+        page = await (await self._bundle()).observations.query(
+            ObservationQuery(
+                scope=scope,
+                page=PageRequest(limit=limit, cursor=cursor),
+                categories=categories,
+                observation_ids=observation_ids,
+                include_payload_metadata=False,
+                names=names,
+                producers=producers,
+                statuses=tuple(ObservationStatus(value) for value in statuses),
+                severities=tuple(ObservationSeverity(value) for value in severities),
+                error_codes=error_codes,
+                duration_ms_at_least=duration_ms_at_least,
+                duration_ms_at_most=duration_ms_at_most,
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+            )
+        )
+        if any(record.trace_id in hidden["trace_id"] for record in page.items):
+            raise ObservabilityUnavailableError("Selected observation is suppressed")
+        return page
+
+    async def read_llm_content_chunk(
+        self,
+        *,
+        run_id: str,
+        llm_call_id: str,
+        section: str,
+        offset: int = 0,
+        limit: int = 4096,
+        entry_index: int | None = None,
+    ) -> Mapping[str, Any]:
+        """Read one exact authorized call section without full-detail hydration.
+
+        Intro:
+            Compact canonical lookup validates owner and visibility before the
+            repository selects a bounded substring of the requested section.
+        Examples:
+            ```python
+            chunk = await facade.read_llm_content_chunk(run_id="run-1", llm_call_id="call-1", section="response")
+            ```
+            ```python
+            chunk = await facade.read_llm_content_chunk(run_id="run-1", llm_call_id="call-1", section="request", entry_index=2)
+            ```
+        Args:
+            run_id: Exact accessible physical owner.
+            llm_call_id: Exact call identity belonging to this run.
+            section: Request, response, trace, tool_surface or attempt.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            entry_index: Request-message index or one-based attempt number.
+        Returns:
+            Mapping: Bounded canonical JSON text and explicit capture availability.
+        Notes:
+            Concatenate chunks before parsing. No unrelated section is hydrated.
+        """
+        page = await self.page_llm_call_records(run_id=run_id, llm_call_ids=(llm_call_id,), limit=1)
+        if not page.items:
+            raise ObservabilityUnavailableError("Selected call is unavailable")
+        scope = self._query_scope(run_id=run_id)
+        result = await (await self._bundle()).observations.read_llm_content_chunk(
+            scope,
+            llm_call_id,
+            section=section,
+            offset=offset,
+            limit=limit,
+            entry_index=entry_index,
+        )
+        if result is None:
+            raise ObservabilityUnavailableError("Selected call content is unavailable")
+        return result
+
+    async def read_engine_event_chunk(
+        self,
+        *,
+        run_id: str,
+        event_id: str,
+        json_path: str,
+        offset: int = 0,
+        limit: int = 4096,
+        match_key: str | None = None,
+        match_value: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Read a selected Engine-event payload path without whole-record hydration.
+
+        Intro:
+            Validates the exact canonical run and Engine tag before returning only
+            the provider's bounded selected JSON text.
+        Examples:
+            ```python
+            chunk = await facade.read_engine_event_chunk(run_id="run-1", event_id="event-1", json_path="$.data.plan")
+            ```
+            ```python
+            chunk = await facade.read_engine_event_chunk(run_id="run-1", event_id="event-1", json_path="$.data.plan.steps", match_key="step_id", match_value="step-1")
+            ```
+        Args:
+            run_id: Exact accessible physical owner.
+            event_id: Exact immutable memory Event identity.
+            json_path: Explicit simple canonical payload path.
+            offset: Zero-based Unicode character offset in selected JSON text.
+            limit: Maximum source characters from one through 16384.
+            match_key: Optional exact array-object identity key.
+            match_value: Exact string identity paired with match_key.
+        Returns:
+            Mapping: Bounded JSON text, immutable source identity and availability.
+        Notes:
+            Unselected payloads and full Event objects are never hydrated.
+        """
+        scope = self._query_scope(run_id=run_id)
+        owner = await self.get_run(run_id)
+        if scope is None or owner is None:
+            raise ObservabilityUnavailableError("Selected Event owner is unavailable")
+        hidden = await self.list_suppressed_scopes(session_id=owner.get("session_id"))
+        if (
+            run_id in hidden["run_id"] | hidden["trace_id"]
+            or owner.get("session_id") in hidden["session_id"]
+        ):
+            raise ObservabilityUnavailableError("Selected Event owner is unavailable")
+        chunk = await (await self._bundle()).memory_events.read_payload_chunk(
+            scope,
+            event_id,
+            json_path=json_path,
+            offset=offset,
+            limit=limit,
+            match_key=match_key,
+            match_value=match_value,
+        )
+        if chunk is None or "agent_engine" not in chunk["tags"]:
+            raise ObservabilityUnavailableError("Selected Engine Event is unavailable")
+        return chunk
+
+    async def supporting_stores(
+        self, *, run_id: str
+    ) -> tuple[StorageScope, DocumentStore, KeyValueStore]:
+        """Bind generic supporting stores to an accessible exact run's owner scope.
+
+        Intro:
+            Allows a higher-level owner to persist disposable read projections using
+            canonical document/CAS contracts without opening provider-private files.
+
+        Examples:
+            Read an owner's projection checkpoint:
+            ```python
+            scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+            checkpoint = await kv.get(scope, "projection.v1", "checkpoint")
+            ```
+            Read a projected head:
+            ```python
+            scope, documents, kv = await facade.supporting_stores(run_id="run-1")
+            head = await documents.get(scope, "projection.v1", "event-1")
+            ```
+
+        Args:
+            run_id: Exact run whose canonical accessibility must be verified first.
+
+        Returns:
+            tuple: Bound scope, generic document store and generic revisioned KV store.
+
+        Notes:
+            Historical readers remain read-only; writes fail through provider contracts.
+            This operation never starts a runtime, opens a writable store or migrates data.
+        """
+        scope = self._query_scope(run_id=run_id)
+        if scope is None or await self.get_run(run_id) is None:
+            raise ObservabilityUnavailableError("Supporting read scope is unavailable")
+        bundle = await self._bundle()
+        return scope, bundle.documents, bundle.kv
 
     async def list_runs(
         self,
@@ -1003,13 +1407,15 @@ def open_observability_workspace(
     *,
     identity: ObservabilityIdentity | None = None,
     run_statuses: Mapping[str, str] | None = None,
+    writable: bool = False,
 ) -> _CanonicalObservabilityFacade:
     """Prepare the exact manifested provider for historical observability reads.
 
     Intro:
         Resolves and validates one authorized workspace manifest synchronously, opens
-        exactly its built-in local provider in read-only mode, and defers asynchronous
-        health admission to the first facade operation.
+        exactly its built-in local provider, and defers asynchronous health admission
+        to the first facade operation. Default reads are read-only. Explicit writable
+        preparation admits provider-owned migrations and supporting-store writes.
 
     Examples:
         Open local historical inspection:
@@ -1030,16 +1436,20 @@ def open_observability_workspace(
         workspace_root: Already-authorized opaque AG runtime workspace root.
         identity: Optional request identity applied to every canonical read.
         run_statuses: Optional catalog-owned status overlay for Inspect enrichment.
+        writable: Explicit maintenance/preparation request; False for all routine reads.
 
     Returns:
         ObservabilityFacade: Stable async read facade owning one provider.
 
     Notes:
         Unmanifested, malformed, unsupported, or non-local workspaces fail directly.
-        No legacy layout probe, migration, alternate provider, or writable open occurs.
+        No legacy layout probe or alternate provider occurs. Routine reads never write
+        or migrate. Only an explicitly authorized preparation caller may set writable.
         Intact older schemas raise ``ObservabilityMigrationRequiredError``; other
         open failures remain ``ObservabilityWorkspaceError``.
     """
+    if not isinstance(writable, bool):
+        raise TypeError("writable must be boolean")
     root = Path(workspace_root).expanduser().resolve()
     try:
         manifest = read_local_workspace_manifest(root)
@@ -1058,7 +1468,11 @@ def open_observability_workspace(
             registry,
             frozenset(
                 {
-                    StorageCapability.READ_ONLY_OPEN,
+                    (
+                        StorageCapability.ATOMIC_COMPARE_AND_SET
+                        if writable
+                        else StorageCapability.READ_ONLY_OPEN
+                    ),
                     StorageCapability.HEALTH,
                 }
             ),
@@ -1070,7 +1484,7 @@ def open_observability_workspace(
                 workspace_root=root,
                 owner_scope=manifest.owner_scope,
                 selection=selection,
-                mode=StorageOpenMode.READ_ONLY,
+                mode=StorageOpenMode.READ_WRITE if writable else StorageOpenMode.READ_ONLY,
                 expected_format_version=manifest.format_version,
                 clock=clock,
                 secrets=_UnavailableHistoricalSecrets(),

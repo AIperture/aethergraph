@@ -941,6 +941,61 @@ class InMemoryObservationRepository:
             return None
         return detail
 
+    async def read_llm_content_chunk(
+        self, scope, llm_call_id, *, section, offset=0, limit=4096, entry_index=None
+    ):
+        from storage_conformance.selected_content import chunk, select
+
+        if section not in {"request", "response", "trace", "tool_surface", "attempt"}:
+            raise ValueError("Invalid content section")
+        if entry_index is not None and (
+            type(entry_index) is not int or entry_index < 0 or section not in {"request", "attempt"}
+        ):
+            raise ValueError("Entry selection requires a request or attempt")
+        if section == "attempt" and (entry_index is None or entry_index < 1):
+            raise ValueError("Attempt content requires an exact one-based attempt number")
+        detail = await self.get_llm_call(scope, llm_call_id)
+        if detail is None:
+            return None
+        record = detail.record
+        value = None
+        reason = "not_retained"
+        if section in {"request", "response", "trace"}:
+            if record.capture_mode not in {
+                storage.ObservationCaptureMode.FULL,
+                storage.ObservationCaptureMode.MANIFEST,
+            }:
+                reason = "capture_policy"
+            else:
+                value = {
+                    "request": detail.captured_request,
+                    "response": detail.captured_response,
+                    "trace": detail.trace_payload,
+                }[section]
+                if entry_index is not None:
+                    value = select(value, f"$.messages[{entry_index}]")
+                    reason = "entry_not_retained"
+        elif section == "tool_surface":
+            value = record.tool_surface
+        else:
+            value = next(
+                (item for item in record.attempts if item.attempt_number == entry_index), None
+            )
+        return chunk(
+            value,
+            {
+                "llm_call_id": llm_call_id,
+                "section": section,
+                "entry_index": entry_index,
+                "capture_mode": record.capture_mode.value,
+                "encoding": "canonical_json_text",
+                "integrity": "conformance_in_memory_content",
+            },
+            offset=offset,
+            limit=limit,
+            reason=reason,
+        )
+
     async def query_llm_calls(self, query):
         rows = (
             detail.record
@@ -950,6 +1005,8 @@ class InMemoryObservationRepository:
             and (not query.providers or detail.record.provider in query.providers)
             and (not query.models or detail.record.model in query.models)
             and (not query.call_types or detail.record.call_type in query.call_types)
+            and (not query.llm_call_ids or detail.record.llm_call_id in query.llm_call_ids)
+            and (not query.call_names or detail.record.call_name in query.call_names)
             and (
                 not query.prompt_manifest_ids
                 or detail.record.prompt_manifest_id in query.prompt_manifest_ids
@@ -964,10 +1021,36 @@ class InMemoryObservationRepository:
                 or detail.record.observation.occurred_at <= query.occurred_at_or_before
             )
         )
-        return _page(sorted(rows, key=lambda item: item.observation.cursor), query.page)
+        selected = sorted(rows, key=lambda item: item.observation.cursor)
+        if not query.include_payload_metadata:
+            selected = [
+                replace(
+                    item,
+                    observation=replace(item.observation, attributes={}, resource_links=()),
+                    request_options={},
+                    request_preview=None,
+                    response_preview=None,
+                    trace_payload_preview=None,
+                    attempts=(),
+                    tool_surface=None,
+                    request_items=None,
+                    response_items=None,
+                    provider_request_facts=None,
+                )
+                for item in selected
+            ]
+        return _page(selected, query.page)
 
     async def get_scope_management(self, scope, scope_key):
         return self._management.get((scope, scope_key))
+
+    async def scope_management_revision(self, scope):
+        records = sorted(
+            (record.scope_key, record.revision)
+            for record in self._management.values()
+            if _scope_matches(record.scope, scope)
+        )
+        return hashlib.sha256(repr(records).encode()).hexdigest()
 
     async def compare_and_set_scope_management(self, record, expected_revision):
         identity = (record.scope, record.scope_key)

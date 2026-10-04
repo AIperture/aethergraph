@@ -144,7 +144,7 @@ class LocalStorageBundle:
             None.
 
         Returns:
-            StorageHealth: Ready only when all database quick checks report `ok`.
+            StorageHealth: Ready only when all database metadata reads succeed.
 
         Notes:
             Closed bundles return a bounded non-ready result instead of reopening
@@ -161,6 +161,37 @@ class LocalStorageBundle:
                         detail=f"{database.role.value}: {status.detail}",
                     )
             return StorageHealth(ready=True, detail="ready")
+
+    async def check_integrity(self) -> StorageHealth:
+        """Run explicit integrity maintenance on all local database roles.
+
+        Scans are serialized with close and checkpoint and may take substantial
+        time on large workspaces. Request startup uses `health` instead.
+
+        Examples:
+            ```python
+            status = await bundle.check_integrity()
+            ```
+            ```python
+            assert (await bundle.check_integrity()).ready
+            ```
+        Args:
+            None.
+        Returns:
+            StorageHealth: First failing role diagnostic, or a ready result.
+        Notes:
+            Read-only bundles are supported; closed bundles remain closed.
+        """
+        async with self._lifecycle.lock:
+            if self._lifecycle.closed or self._lifecycle.databases_closed:
+                return StorageHealth(ready=False, detail="closed")
+            for database in self._databases:
+                status = await database.check_integrity()
+                if not status.ready:
+                    return StorageHealth(
+                        ready=False, detail=f"{database.role.value}: {status.detail}"
+                    )
+            return StorageHealth(ready=True, detail="ok")
 
     async def checkpoint(self) -> Mapping[LocalDatabaseRole, LocalCheckpoint]:
         """Checkpoint every writable SQLite role and record maintenance time.

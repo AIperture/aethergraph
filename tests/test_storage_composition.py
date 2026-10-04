@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 import inspect
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -120,6 +121,109 @@ def _composition(
     provider = _Provider(bundle)
     registry = StorageProviderRegistry({provider.name: lambda: provider})
     return StorageComposition(registry, required), provider
+
+
+@pytest.mark.asyncio
+async def test_startup_cancellation_survives_cleanup(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+
+    class CancelBundle(_Bundle):
+        async def health(self) -> StorageHealth:
+            entered.set()
+            await asyncio.Future()
+
+    bundle = CancelBundle()
+    composition, _ = _composition(bundle)
+    composition.prepare(_request(tmp_path))
+    task = asyncio.create_task(composition.start())
+    await entered.wait()
+    task.cancel("case canceled")
+    with pytest.raises(asyncio.CancelledError, match="case canceled"):
+        await task
+    assert bundle.close_calls == 1
+    await composition.close()
+    assert bundle.close_calls == 1
+    assert composition.startup_diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_health", [True, False])
+async def test_canceled_startup_cleanup_remains_retryable(
+    tmp_path: Path, cancel_health: bool
+) -> None:
+    entered = asyncio.Event()
+    cleaning = asyncio.Event()
+
+    class Bundle(_Bundle):
+        async def health(self) -> StorageHealth:
+            entered.set()
+            if cancel_health:
+                await asyncio.Future()
+            raise StorageHealthError("unavailable")
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                cleaning.set()
+                await asyncio.Future()
+
+    bundle = Bundle()
+    composition, _ = _composition(bundle)
+    composition.prepare(_request(tmp_path))
+    task = asyncio.create_task(composition.start())
+    await entered.wait()
+    if cancel_health:
+        task.cancel("original cancellation")
+    await cleaning.wait()
+    task.cancel("cleanup cancellation")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await composition.close()
+    assert bundle.close_calls == 2
+    if cancel_health:
+        assert composition.startup_diagnostic is None
+    else:
+        assert composition.startup_diagnostic.exception_type == "StorageHealthError"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cancel_holds_connection_until_thread_settles(tmp_path: Path) -> None:
+    from aethergraph.storage.providers.local_sqlite.database import (
+        LocalDatabaseRole,
+        LocalSQLiteDatabase,
+    )
+
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def operation(connection):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "test barrier was not released"
+        return connection.execute("SELECT 1").fetchone()[0]
+
+    task = asyncio.create_task(database._run(operation))
+    await entered.wait()
+    task.cancel("cancel query")
+    close = asyncio.create_task(database.close())
+    try:
+        await asyncio.sleep(0)
+        task.cancel("repeat cancellation")
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not close.done()
+        assert not database._closed
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError, match="cancel query"):
+        await task
+    await close
+    assert database._closed
 
 
 def test_provider_construction_is_synchronous_while_bundle_lifecycle_is_async() -> None:
@@ -301,8 +405,7 @@ async def test_failed_startup_cleanup_retains_exact_bundle_for_close_retry(
         return_exceptions=True,
     )
     assert all(
-        isinstance(error, StorageStartupError)
-        and error.diagnostic == diagnostic
+        isinstance(error, StorageStartupError) and error.diagnostic == diagnostic
         for error in concurrent
     )
     with pytest.raises(StorageStartupError) as prepare_again:
