@@ -53,10 +53,18 @@ _CLIENT_SEARCH_SCHEMA = {
     "status,expected", [("incomplete", "truncated"), ("completed", "invalid_arguments")]
 )
 async def test_native_incomplete_arguments_preserve_provider_cause_before_decoding(
-    status, expected
+    status, expected, monkeypatch
 ):
     sink = _ObservationSink()
     client = GenericLLMClient("openai", "gpt-5.6", api_key="test", observation_sink=sink)
+    accounted = []
+    account = client._account_llm_usage
+
+    async def capture_accounting(**kwargs):
+        accounted.append(kwargs["usage"])
+        return await account(**kwargs)
+
+    monkeypatch.setattr(client, "_account_llm_usage", capture_accounting)
     client._client = _CountingHttpClient(
         {
             "id": "response-truncated",
@@ -89,6 +97,8 @@ async def test_native_incomplete_arguments_preserve_provider_cause_before_decodi
     assert caught.value.response_diagnostics["tool_arguments"][0]["name"] == "apply_patch"
     assert caught.value.response_diagnostics["max_output_tokens"] == 8192
     assert caught.value.response_usage["output_tokens"] == 8
+    if status == "incomplete":
+        assert len(accounted) == 1 and accounted[0]["output_tokens"] == 8
 
 
 class _FakeResponse:

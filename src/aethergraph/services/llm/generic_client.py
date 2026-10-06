@@ -2781,13 +2781,18 @@ class GenericLLMClient(LLMClientProtocol):
                     observation_record.response_items = list(
                         tool_call_response_item_summaries(provider_value)
                     )
-                    raise LLMToolCallResponseError(
+                    truncation_error = LLMToolCallResponseError(
                         code="truncated",
                         message=(
                             "The provider stopped before completing native Tool "
                             f"selection: {truncation_receipt['incomplete_reason']}."
                         ),
                     )
+                    truncation_error.response_usage = dict(usage or {})
+                    truncation_error.response_diagnostics = dict(
+                        provider_value.provider_metadata.get("response_diagnostics") or {}
+                    )
+                    raise truncation_error
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.

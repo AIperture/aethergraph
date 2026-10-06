@@ -1319,43 +1319,51 @@ class OpenAIResponsesAdapter:
             # Existing parsing logic for message-only flows
             output = data.get("output")
             if tool_request is not None:
+                response_diagnostics = {
+                    "response_id": str(data.get("id") or "")[:256],
+                    "status": str(data.get("status") or "unknown")[:64],
+                    "incomplete_reason": str(
+                        (data.get("incomplete_details") or {}).get("reason") or ""
+                    )[:256],
+                    "max_output_tokens": max_output_tokens,
+                    "tool_arguments": [
+                        {
+                            "call_id": str(item.get("call_id") or "")[:256],
+                            "name": str(item.get("name") or "")[:128],
+                            "argument_chars": len(str(item.get("arguments") or "")),
+                        }
+                        for item in (data.get("output") or [])[:16]
+                        if isinstance(item, dict) and item.get("type") == "function_call"
+                    ],
+                }
                 try:
                     if data.get("status") == "incomplete":
-                        reason = str(
-                            (data.get("incomplete_details") or {}).get("reason") or "unknown"
-                        )[:256]
-                        raise LLMToolCallResponseError(
-                            code="truncated",
-                            message=f"OpenAI stopped before completing native Tool selection: {reason}.",
+                        # Preserve the shared client's usage/quota/receipt owner
+                        # while deliberately admitting no partial Tool arguments.
+                        response = ToolCallResponse(
+                            items=(),
+                            finish_reason="incomplete",
+                            provider_metadata={
+                                "response_id": response_diagnostics["response_id"],
+                                "provider_status": "incomplete",
+                                "incomplete_reason": response_diagnostics["incomplete_reason"]
+                                or "unknown",
+                                "response_diagnostics": response_diagnostics,
+                            },
                         )
-                    response = _openai_tool_call_response(
-                        data,
-                        tool_request=tool_request,
-                        model=model,
-                        prompt_message_count=len(input_messages),
-                        prompt_prefix_digest=prompt_prefix_digest,
-                    )
+                    else:
+                        response = _openai_tool_call_response(
+                            data,
+                            tool_request=tool_request,
+                            model=model,
+                            prompt_message_count=len(input_messages),
+                            prompt_prefix_digest=prompt_prefix_digest,
+                        )
                 except LLMToolCallResponseError as exc:
                     # Retain provider facts even when normalization cannot produce
                     # response items. Never infer truncation from malformed JSON.
                     exc.response_usage = dict(usage or {})
-                    exc.response_diagnostics = {
-                        "response_id": str(data.get("id") or "")[:256],
-                        "status": str(data.get("status") or "unknown")[:64],
-                        "incomplete_reason": str(
-                            (data.get("incomplete_details") or {}).get("reason") or ""
-                        )[:256],
-                        "max_output_tokens": max_output_tokens,
-                        "tool_arguments": [
-                            {
-                                "call_id": str(item.get("call_id") or "")[:256],
-                                "name": str(item.get("name") or "")[:128],
-                                "argument_chars": len(str(item.get("arguments") or "")),
-                            }
-                            for item in (data.get("output") or [])[:16]
-                            if isinstance(item, dict) and item.get("type") == "function_call"
-                        ],
-                    }
+                    exc.response_diagnostics = response_diagnostics
                     raise
                 return ProviderCallResult(
                     (
