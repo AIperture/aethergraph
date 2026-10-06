@@ -1320,6 +1320,14 @@ class OpenAIResponsesAdapter:
             output = data.get("output")
             if tool_request is not None:
                 try:
+                    if data.get("status") == "incomplete":
+                        reason = str(
+                            (data.get("incomplete_details") or {}).get("reason") or "unknown"
+                        )[:256]
+                        raise LLMToolCallResponseError(
+                            code="truncated",
+                            message=f"OpenAI stopped before completing native Tool selection: {reason}.",
+                        )
                     response = _openai_tool_call_response(
                         data,
                         tool_request=tool_request,
@@ -1337,6 +1345,7 @@ class OpenAIResponsesAdapter:
                         "incomplete_reason": str(
                             (data.get("incomplete_details") or {}).get("reason") or ""
                         )[:256],
+                        "max_output_tokens": max_output_tokens,
                         "tool_arguments": [
                             {
                                 "call_id": str(item.get("call_id") or "")[:256],
