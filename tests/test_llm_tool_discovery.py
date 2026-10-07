@@ -48,6 +48,59 @@ _CLIENT_SEARCH_SCHEMA = {
 }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,expected", [("incomplete", "truncated"), ("completed", "invalid_arguments")]
+)
+async def test_native_incomplete_arguments_preserve_provider_cause_before_decoding(
+    status, expected, monkeypatch
+):
+    sink = _ObservationSink()
+    client = GenericLLMClient("openai", "gpt-5.6", api_key="test", observation_sink=sink)
+    accounted = []
+    account = client._account_llm_usage
+
+    async def capture_accounting(**kwargs):
+        accounted.append(kwargs["usage"])
+        return await account(**kwargs)
+
+    monkeypatch.setattr(client, "_account_llm_usage", capture_accounting)
+    client._client = _CountingHttpClient(
+        {
+            "id": "response-truncated",
+            "status": status,
+            "incomplete_details": {"reason": "max_output_tokens"}
+            if status == "incomplete"
+            else None,
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "patch-call",
+                    "name": "apply_patch",
+                    "arguments": '{"patch":"unfinished',
+                }
+            ],
+            "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+        }
+    )
+    client._bound_loop = asyncio.get_running_loop()
+    with pytest.raises(LLMToolCallResponseError) as caught:
+        await client.chat(
+            [{"role": "user", "content": "patch"}],
+            max_output_tokens=8192,
+            tool_request=ToolCallRequest(
+                tools=(ToolDefinition("apply_patch", "Patch", {"type": "object"}),)
+            ),
+        )
+    assert caught.value.code == expected
+    assert caught.value.response_diagnostics["status"] == status
+    assert caught.value.response_diagnostics["tool_arguments"][0]["name"] == "apply_patch"
+    assert caught.value.response_diagnostics["max_output_tokens"] == 8192
+    assert caught.value.response_usage["output_tokens"] == 8
+    if status == "incomplete":
+        assert len(accounted) == 1 and accounted[0]["output_tokens"] == 8
+
+
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
@@ -353,9 +406,7 @@ async def test_anthropic_failed_client_discovery_uses_tool_result_error() -> Non
     assert error_result["type"] == "tool_result"
     assert error_result["tool_use_id"] == "toolu_search_1"
     assert error_result["is_error"] is True
-    assert json.loads(error_result["content"])["code"] == (
-        "tool_discovery_no_matches"
-    )
+    assert json.loads(error_result["content"])["code"] == ("tool_discovery_no_matches")
 
 
 def _checkpoint(
@@ -400,9 +451,7 @@ def test_tool_call_contract_carries_deferred_discovery_and_opaque_checkpoint() -
 
     assert request.tools[0].exposure == "deferred"
     assert request.discovery is not None
-    assert request.discovery.search_instructions == (
-        "Root search is disabled; use studio.docs."
-    )
+    assert request.discovery.search_instructions == ("Root search is disabled; use studio.docs.")
     assert request.turn_id == "turn_1"
     assert request.transport_checkpoint is not None
     assert len(tool_call_request_fingerprint(request)) == 64
@@ -428,9 +477,7 @@ def test_discovery_instructions_change_tool_request_fingerprint() -> None:
         turn_id="turn_1",
     )
 
-    assert tool_call_request_fingerprint(unrestricted) != tool_call_request_fingerprint(
-        restricted
-    )
+    assert tool_call_request_fingerprint(unrestricted) != tool_call_request_fingerprint(restricted)
 
     normalized = ToolDiscoveryRequest(
         "native_client",
@@ -801,9 +848,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
             "native_client",
             max_results=5,
             search_schema=_CLIENT_SEARCH_SCHEMA,
-            search_instructions=(
-                "Root search is disabled. Use the authorized studio.docs path."
-            ),
+            search_instructions=("Root search is disabled. Use the authorized studio.docs path."),
         ),
         turn_id="turn_1",
     )
@@ -1089,9 +1134,7 @@ async def test_openai_new_turn_tool_output_keeps_root_declared_active_tool() -> 
     assert called.transport_checkpoint is not None
     assert called.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_json is not None
-    assert "read_document" in {
-        tool.get("name") for tool in fake_http.last_json["tools"]
-    }
+    assert "read_document" in {tool.get("name") for tool in fake_http.last_json["tools"]}
     root_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert root_projection["request_family"] == "full_root"
     assert root_projection["top_level_tool_names"] == [
@@ -1121,21 +1164,15 @@ async def test_openai_new_turn_tool_output_keeps_root_declared_active_tool() -> 
             turn_id="turn_2",
             active_tool_names=("read_document",),
             transport_checkpoint=called.transport_checkpoint,
-            tool_outputs=(
-                ToolCallOutput("read_call_turn_2", '{"status":"ok"}'),
-            ),
+            tool_outputs=(ToolCallOutput("read_call_turn_2", '{"status":"ok"}'),),
         ),
     )
 
     assert isinstance(finished, ToolCallResponse)
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_read_turn_2"
-    assert "read_document" in {
-        tool.get("name") for tool in fake_http.last_json["tools"]
-    }
-    continuation_projection = sink.records[-1].provider_request_facts[
-        "tool_projection"
-    ]
+    assert "read_document" in {tool.get("name") for tool in fake_http.last_json["tools"]}
+    continuation_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert continuation_projection["request_family"] == "pending_tool_outputs"
     assert continuation_projection["top_level_tool_names"] == [
         "finish",
@@ -1663,9 +1700,7 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
-        discovery_result=_completed_discovery_result(
-            provider_reference_id="toolu_search_1"
-        ),
+        discovery_result=_completed_discovery_result(provider_reference_id="toolu_search_1"),
     )
 
     second, _usage = await client.chat(
@@ -1825,9 +1860,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
                 ),
             ),
         )
-    assert unsupported_failure.value.code == (
-        "discovery_failure_output_unsupported"
-    )
+    assert unsupported_failure.value.code == ("discovery_failure_output_unsupported")
     assert fake_http.calls == calls_before_failed_resolution
 
     fake_http.payload = {
@@ -1849,9 +1882,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=response.transport_checkpoint,
-        discovery_result=_completed_discovery_result(
-            provider_reference_id="azure_search_1"
-        ),
+        discovery_result=_completed_discovery_result(provider_reference_id="azure_search_1"),
     )
 
     called, _usage = await client.chat(
