@@ -25,6 +25,7 @@ from .context_management import (
     MODEL_CONTEXT_CHECKPOINT_VERSION,
     ModelContextCheckpoint,
     ModelContextManagement,
+    ServerContextCompactionSupport,
 )
 from .contracts import (
     MODEL_REQUEST_CONTRACT_VERSION,
@@ -239,6 +240,7 @@ __all__ = [
     "MODEL_CONTEXT_CHECKPOINT_VERSION",
     "ModelContextCheckpoint",
     "ModelContextManagement",
+    "ServerContextCompactionSupport",
     "LLMStructuredOutputCapabilityError",
     "LLMStructuredOutputError",
     "LLMStructuredOutputParseError",

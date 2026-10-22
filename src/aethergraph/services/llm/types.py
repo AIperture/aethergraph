@@ -371,6 +371,8 @@ class LLMRequestEstimate:
     context_window_tokens: int | None
     source: str
     measurement_scope: str = "submitted_context_only"
+    approximate_input_tokens: int | None = None
+    """Uncalibrated chars/4 input estimate behind `estimated_input_tokens`."""
 
 
 class LLMContextWindowExceededError(LLMError):

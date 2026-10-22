@@ -1090,10 +1090,8 @@ class OpenAIResponsesAdapter:
                 *_normalize_openai_responses_input(appended),
             ]
         if context_management is not None:
-            if context_management.instructions is not None:
-                raise ValueError(
-                    "OpenAI Responses server compaction does not support custom instructions"
-                )
+            # Custom-instruction support is a catalog fact enforced before dispatch
+            # by GenericLLMClient.server_context_compaction_support.
             body["context_management"] = [
                 {
                     "type": "compaction",

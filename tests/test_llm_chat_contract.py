@@ -36,6 +36,7 @@ from aethergraph.services.llm.adapters import (
 )
 from aethergraph.services.llm.adapters.gemini import _gemini_generate_content_payload
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.request_validation import LLMRequestCompatibilityError
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
     ProviderCallResult,
@@ -3672,17 +3673,65 @@ async def test_openai_responses_server_compaction_rejects_custom_instructions() 
     fake_http = _FakeHttpClient({})
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
+    management = ModelContextManagement(
+        trigger_tokens=80_000,
+        instructions="Preserve exact identifiers.",
+    )
 
-    with pytest.raises(ValueError, match="does not support custom instructions"):
+    support = client.server_context_compaction_support(management)
+    assert support.state == "supported"
+    assert support.code == "server_compaction_instructions_unsupported"
+    with pytest.raises(LLMRequestCompatibilityError) as rejected:
         await client.generate(
             ModelRequest(
                 messages=(message_from_text("user", "Start"),),
-                context_management=ModelContextManagement(
-                    trigger_tokens=80_000,
-                    instructions="Preserve exact identifiers.",
-                ),
+                context_management=management,
             )
         )
+    assert rejected.value.report.diagnostics[0].code == (
+        "server_compaction_instructions_unsupported"
+    )
+    assert fake_http.last_json is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "trigger", "state", "code", "minimum"),
+    [
+        ("openai", "gpt-5.2", 8_000, "supported", "", None),
+        (
+            "anthropic",
+            "claude-opus-5-5",
+            8_000,
+            "supported",
+            "server_compaction_trigger_below_minimum",
+            50_000,
+        ),
+        ("anthropic", "claude-opus-5-5", 50_000, "supported", "", 50_000),
+        ("openai", "gpt-unlisted-model", 80_000, "unknown", "server_compaction_model_unknown", None),
+    ],
+)
+def test_server_compaction_support_reports_catalog_constraints(
+    provider, model, trigger, state, code, minimum
+) -> None:
+    client = GenericLLMClient(provider=provider, model=model, api_key="test")
+    support = client.server_context_compaction_support(
+        ModelContextManagement(trigger_tokens=trigger)
+    )
+    assert (support.state, support.code, support.minimum_trigger_tokens) == (
+        state,
+        code,
+        minimum,
+    )
+    assert support.usable is (state == "supported" and not code)
+
+
+def test_server_compaction_support_rejects_unimplemented_adapters() -> None:
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    support = client.server_context_compaction_support(
+        ModelContextManagement(trigger_tokens=80_000)
+    )
+    assert support.state == "unsupported"
+    assert support.code == "server_compaction_adapter_unimplemented"
 
 
 @pytest.mark.asyncio
@@ -3795,3 +3844,42 @@ async def test_malformed_arguments_preserve_completed_provider_facts_without_pay
     assert facts["tool_arguments"][0]["argument_chars"] == 16
     assert "private" not in finished[0].raw_text
     assert finished[0].usage
+
+
+def test_estimate_calibrates_from_complete_provider_context_size() -> None:
+    client = GenericLLMClient(provider="anthropic", model="claude-opus-5-5", api_key="test")
+    messages = [{"role": "user", "content": "x" * 4000}]
+    first = client.estimate_chat_request(messages, max_output_tokens=10)
+    assert first.source == "approximate_chars_div_4_images_excluded"
+    assert first.approximate_input_tokens == first.estimated_input_tokens
+
+    # Anthropic reports cache reads separately; the complete context counts all.
+    client._observe_estimate_calibration(
+        model="claude-opus-5-5",
+        estimate=first,
+        usage={
+            "uncached_input_tokens": first.estimated_input_tokens // 2,
+            "cache_read_tokens": first.estimated_input_tokens,
+            "cache_write_tokens": 0,
+        },
+    )
+    calibrated = client.estimate_chat_request(messages, max_output_tokens=10)
+    ratio = (first.estimated_input_tokens // 2 + first.estimated_input_tokens) / (
+        first.approximate_input_tokens
+    )
+    assert calibrated.source == "calibrated_chars_div_4_images_excluded"
+    assert calibrated.approximate_input_tokens == first.approximate_input_tokens
+    assert calibrated.estimated_input_tokens == round(first.approximate_input_tokens * ratio)
+
+    # An implausible sample is clamped and averaged, never trusted outright.
+    client._observe_estimate_calibration(
+        model="claude-opus-5-5",
+        estimate=first,
+        usage={"uncached_input_tokens": first.estimated_input_tokens * 100},
+    )
+    clamped = client.estimate_chat_request(messages, max_output_tokens=10)
+    assert clamped.estimated_input_tokens == round(
+        first.approximate_input_tokens * (ratio + 2.0) / 2
+    )
+    other_model = client.estimate_chat_request(messages, max_output_tokens=10, model="other")
+    assert other_model.source == "approximate_chars_div_4_images_excluded"
