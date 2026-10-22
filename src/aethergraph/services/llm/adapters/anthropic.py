@@ -1132,8 +1132,8 @@ class AnthropicMessagesAdapter:
             **sampling_fields,
         }
         if context_management is not None:
-            if context_management.trigger_tokens < 50_000:
-                raise ValueError("Anthropic compaction trigger must be at least 50000 tokens")
+            # Catalog minimum-trigger facts are enforced once, before dispatch, by
+            # GenericLLMClient.server_context_compaction_support.
             edit: dict[str, Any] = {
                 "type": "compact_20260112",
                 "trigger": {

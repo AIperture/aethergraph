@@ -31,6 +31,31 @@ class ModelContextManagement:
             object.__setattr__(self, "instructions", value)
 
 
+ServerContextCompactionState = Literal["supported", "unsupported", "unknown"]
+
+
+@dataclass(frozen=True)
+class ServerContextCompactionSupport:
+    """Report whether one bound model can own context compaction for a policy.
+
+    `state` is the catalog/adapter capability. `code` is empty only when the
+    capability is supported and the requested trigger and instructions satisfy
+    every catalog constraint; otherwise it names the first unmet requirement.
+    """
+
+    state: ServerContextCompactionState
+    code: str = ""
+    message: str = ""
+    minimum_trigger_tokens: int | None = None
+    custom_instructions: ServerContextCompactionState = "unknown"
+
+    @property
+    def usable(self) -> bool:
+        """Return whether provider compaction can serve the requested policy."""
+
+        return self.state == "supported" and not self.code
+
+
 @dataclass(frozen=True)
 class ModelContextCheckpoint:
     """Carry opaque provider compaction state across semantic turns."""
@@ -218,6 +243,8 @@ __all__ = [
     "MODEL_CONTEXT_CHECKPOINT_VERSION",
     "ModelContextCheckpoint",
     "ModelContextManagement",
+    "ServerContextCompactionState",
+    "ServerContextCompactionSupport",
     "model_context_message_digest",
     "validate_model_context_prefix",
 ]

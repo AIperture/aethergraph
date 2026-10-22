@@ -41,6 +41,13 @@ from aethergraph.services.llm.compat.endpoint_selection import (
 from aethergraph.services.llm.compat.image_generation import (
     image_client_from_legacy_chat,
 )
+from aethergraph.services.llm.catalog.loader import (
+    resolve_model_catalog_capability_entry,
+)
+from aethergraph.services.llm.context_management import (
+    ModelContextManagement,
+    ServerContextCompactionSupport,
+)
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -78,6 +85,7 @@ from aethergraph.services.llm.request_preparation import (
 )
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
+    RequestCompatibilityDiagnostic,
     validate_model_request,
 )
 from aethergraph.services.llm.streaming import (
@@ -405,6 +413,8 @@ class GenericLLMClient(LLMClientProtocol):
         self._retired_compat_image_clients: list[ImageGenerationClientProtocol] = []
         self._image_assignment_managed = False
         self._logger = logging.getLogger("aethergraph.services.llm")
+        # Process-local (provider, model) -> provider/approximate input ratio.
+        self._estimate_calibration: dict[tuple[str, str], float] = {}
 
     def _resolve_chat_adapter(self, *, has_tool_request: bool):
         """Resolve the exact adapter for one current Chat invocation shape.
@@ -1730,13 +1740,60 @@ class GenericLLMClient(LLMClientProtocol):
                 )
             )
         reserved_output_tokens = max(0, int(max_output_tokens or 0))
+        approximate_input_tokens = estimated_input_tokens
+        ratio = self._estimate_calibration_ratio(str(model or self.model))
+        if ratio is not None:
+            estimated_input_tokens = max(1, round(approximate_input_tokens * ratio))
         return LLMRequestEstimate(
             model=str(model or self.model),
             estimated_input_tokens=estimated_input_tokens,
             reserved_output_tokens=reserved_output_tokens,
             estimated_total_tokens=estimated_input_tokens + reserved_output_tokens,
             context_window_tokens=self.context_window_tokens,
-            source="approximate_chars_div_4_images_excluded",
+            source=(
+                "calibrated_chars_div_4_images_excluded"
+                if ratio is not None
+                else "approximate_chars_div_4_images_excluded"
+            ),
+            approximate_input_tokens=approximate_input_tokens,
+        )
+
+    _ESTIMATE_CALIBRATION_BOUNDS = (0.5, 2.0)
+
+    def _estimate_calibration_ratio(self, model: str) -> float | None:
+        """Return the observed provider-to-approximate token ratio for one model."""
+
+        return self._estimate_calibration.get((str(self.provider or ""), str(model)))
+
+    def _observe_estimate_calibration(
+        self,
+        *,
+        model: str,
+        estimate: LLMRequestEstimate,
+        usage: dict[str, Any],
+    ) -> None:
+        """Calibrate later estimates from one completed call's provider input size.
+
+        The provider's complete context size is uncached plus cache-read and
+        cache-write input, which is provider-neutral across inclusive (OpenAI) and
+        exclusive (Anthropic) cache accounting. A moving average bounded to
+        `_ESTIMATE_CALIBRATION_BOUNDS` keeps one unusual call from dominating.
+        """
+
+        approximate = int(estimate.approximate_input_tokens or 0)
+        observed = (
+            int(usage.get("uncached_input_tokens") or 0)
+            + int(usage.get("cache_read_tokens") or 0)
+            + int(usage.get("cache_write_tokens") or 0)
+        )
+        if approximate <= 0 or observed <= 0:
+            return
+        low, high = self._ESTIMATE_CALIBRATION_BOUNDS
+        sample = min(high, max(low, observed / approximate))
+        key = (str(self.provider or ""), str(model))
+        previous = self._estimate_calibration.get(key)
+        self._estimate_calibration[key] = (
+            sample if previous is None else (previous + sample) / 2
         )
 
     def estimate(self, request: ModelRequest) -> LLMRequestEstimate:
@@ -1820,8 +1877,136 @@ class GenericLLMClient(LLMClientProtocol):
             )
         )
         report = validate_model_request(request, adapter=adapter)
+        if report.valid and request.context_management is not None:
+            support = self.server_context_compaction_support(request.context_management)
+            # Unknown catalog state is resolved by the explicit profile owner;
+            # only cataloged facts and constraints are enforced here.
+            if support.state == "unsupported" or (
+                support.state == "supported" and support.code
+            ):
+                report = replace(
+                    report,
+                    diagnostics=(
+                        RequestCompatibilityDiagnostic(
+                            code=support.code,
+                            features=("server_context_compaction",),
+                            message=support.message,
+                        ),
+                    ),
+                    valid=False,
+                )
         if not report.valid:
             raise LLMRequestCompatibilityError(report)
+
+    def server_context_compaction_support(
+        self,
+        management: ModelContextManagement,
+    ) -> ServerContextCompactionSupport:
+        """Report whether this bound model can own compaction for one policy.
+
+        Intro:
+            Combines the exact endpoint adapter implementation with the model
+            catalog's server-compaction facts, including the minimum trigger and
+            custom-instruction support, so callers never restate provider facts.
+
+        Examples:
+            Check an OpenAI Responses binding:
+                ```python
+                support = client.server_context_compaction_support(
+                    ModelContextManagement(trigger_tokens=24_000)
+                )
+                assert support.state in {"supported", "unsupported", "unknown"}
+                ```
+
+            Detect an Anthropic trigger below the catalog minimum:
+                ```python
+                support = client.server_context_compaction_support(
+                    ModelContextManagement(trigger_tokens=8_000)
+                )
+                assert support.code == "server_compaction_trigger_below_minimum"
+                ```
+
+        Args:
+            management: Requested provider compaction policy.
+
+        Returns:
+            ServerContextCompactionSupport: Capability state and the first unmet
+            constraint, if any.
+
+        Notes:
+            No provider request is made. An uncataloged model reports
+            `unknown`, never `supported`.
+        """
+
+        adapter = self._resolve_chat_adapter(has_tool_request=True)
+        if "server_context_compaction" not in adapter.implementation_capabilities:
+            return ServerContextCompactionSupport(
+                state="unsupported",
+                code="server_compaction_adapter_unimplemented",
+                message=(
+                    f"Endpoint adapter {adapter.adapter_id!r} does not implement "
+                    "provider context compaction."
+                ),
+            )
+        entry = resolve_model_catalog_capability_entry(
+            str(self.provider or ""),
+            str(self.model or ""),
+            "chat",
+            adapter.adapter_id,
+            capability="server_context_compaction",
+        )
+        facts = getattr(entry, "server_context_compaction", None)
+        if facts is None:
+            return ServerContextCompactionSupport(
+                state="unknown",
+                code="server_compaction_model_unknown",
+                message=(
+                    f"The model catalog has no provider compaction facts for "
+                    f"{self.provider}/{self.model}."
+                ),
+            )
+        details = {
+            "minimum_trigger_tokens": facts.minimum_trigger_tokens,
+            "custom_instructions": facts.custom_instructions,
+        }
+        if facts.state != "supported":
+            return ServerContextCompactionSupport(
+                state=facts.state,
+                code="server_compaction_model_unsupported",
+                message=(
+                    f"{self.provider}/{self.model} does not support provider "
+                    "context compaction."
+                ),
+                **details,
+            )
+        if (
+            facts.minimum_trigger_tokens is not None
+            and management.trigger_tokens < facts.minimum_trigger_tokens
+        ):
+            return ServerContextCompactionSupport(
+                state="supported",
+                code="server_compaction_trigger_below_minimum",
+                message=(
+                    f"{self.provider}/{self.model} provider compaction requires a "
+                    f"trigger of at least {facts.minimum_trigger_tokens} tokens; "
+                    f"the policy requests {management.trigger_tokens}."
+                ),
+                **details,
+            )
+        if (
+            management.instructions is not None
+            and facts.custom_instructions == "unsupported"
+        ):
+            return ServerContextCompactionSupport(
+                state="supported",
+                code="server_compaction_instructions_unsupported",
+                message=(
+                    f"{self.provider}/{self.model} provider compaction does not "
+                    "accept custom preservation instructions."
+                ),
+                **details,
+            )
+        return ServerContextCompactionSupport(state="supported", **details)
 
     def _preflight_llm_request(
         self,
@@ -2760,6 +2945,14 @@ class GenericLLMClient(LLMClientProtocol):
                 latency_ms=observation_record.latency_ms,
                 reservation=quota_reservation,
             )
+            if context_management is None and context_checkpoint is None:
+                # Provider-owned compaction replaces the submitted prefix, so its
+                # usage does not measure the messages this estimate counted.
+                self._observe_estimate_calibration(
+                    model=model,
+                    estimate=request_estimate,
+                    usage=normalized_usage,
+                )
             if isinstance(provider_value, ToolCallResponse):
                 provider_value = replace(
                     provider_value,
